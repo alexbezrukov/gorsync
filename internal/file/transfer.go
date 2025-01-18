@@ -2,7 +2,6 @@ package file
 
 import (
 	"bufio"
-	"encoding/base64"
 	"fmt"
 	"gorsync/pkg/utils"
 	"io"
@@ -46,18 +45,31 @@ func SendDirectory(conn net.Conn, sourceDir, destAddr string, recursive bool) er
 				return fmt.Errorf("failed to send directory event: %v", err)
 			}
 		} else {
-			// Send file content
+			event := fmt.Sprintf("CREATE_FILE|%s\n", relPath)
+			_, err := conn.Write([]byte(event))
+			if err != nil {
+				return fmt.Errorf("failed to send file event: %v", err)
+			}
+
+			// Send the file content in chunks
 			content, err := os.ReadFile(path)
 			if err != nil {
 				return fmt.Errorf("failed to read file: %v", err)
 			}
 
-			encodedContent := base64.StdEncoding.EncodeToString(content)
-
-			event := fmt.Sprintf("CREATE_FILE|%s|%s\n", relPath, encodedContent)
-			_, err = conn.Write([]byte(event))
-			if err != nil {
-				return fmt.Errorf("failed to send file content: %v", err)
+			// Send the file content in chunks
+			chunkSize := 1024 // Example chunk size
+			for i := 0; i < len(content); i += chunkSize {
+				end := i + chunkSize
+				if end > len(content) {
+					end = len(content)
+				}
+				chunk := content[i:end]
+				event = fmt.Sprintf("WRITE_FILE|%s|%s\n", relPath, string(chunk)) // Send the chunk
+				_, err := conn.Write([]byte(event))
+				if err != nil {
+					return fmt.Errorf("failed to send file chunk: %v", err)
+				}
 			}
 		}
 		return nil

@@ -2,7 +2,6 @@ package server
 
 import (
 	"bufio"
-	"encoding/base64"
 	"fmt"
 	"gorsync/pkg/utils"
 	"log"
@@ -88,33 +87,25 @@ func processEvent(event Event, destDir string) {
 		}
 
 	case "CREATE_FILE":
-		// Handle file creation and writing content in one go
+		// Create the file and write the content
+		destPath := filepath.Join(destDir, event.Payload)
+		err := createFile(destPath)
+		if err != nil {
+			log.Printf("Failed to create file: %v\n", err)
+			return
+		}
+	case "WRITE_FILE":
 		parts := strings.SplitN(event.Payload, "|", 2)
 		if len(parts) != 2 {
 			log.Printf("invalid message format of write event: %s\n", event.Payload)
 			return
 		}
 
-		// Create the file and write the content
 		destPath := filepath.Join(destDir, parts[0])
-		encodedContent := parts[1]
+		content := parts[1]
 
-		// Decode Base64 content
-		content, err := base64.StdEncoding.DecodeString(encodedContent)
-		if err != nil {
-			log.Printf("failed to decode Base64 content: %v\n", err)
-			return
-		}
-
-		// Create the file (if it doesn't exist)
-		err = createFile(destPath)
-		if err != nil {
-			log.Printf("Failed to create file: %v\n", err)
-			return
-		}
-
-		// Write content to the file
-		err = writeFileContent(destPath, content)
+		// Write content to file (append mode)
+		err := writeFileContent(destPath, []byte(content))
 		if err != nil {
 			log.Printf("Failed to write file content: %v\n", err)
 		} else {
