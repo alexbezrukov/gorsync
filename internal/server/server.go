@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"encoding/base64"
 	"fmt"
 	"gorsync/pkg/utils"
 	"log"
@@ -64,7 +65,7 @@ func handleConnection(conn net.Conn, destDir string) {
 		log.Printf("Received event: %v\n", event)
 
 		// Process the event (add to queue or handle directly)
-		processEvent(event, destDir, conn)
+		processEvent(event, destDir)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -72,7 +73,7 @@ func handleConnection(conn net.Conn, destDir string) {
 	}
 }
 
-func processEvent(event Event, destDir string, conn net.Conn) {
+func processEvent(event Event, destDir string) {
 	switch event.Type {
 	case "CREATE_DIR":
 		// Handle directory creation
@@ -96,10 +97,17 @@ func processEvent(event Event, destDir string, conn net.Conn) {
 
 		// Create the file and write the content
 		destPath := filepath.Join(destDir, parts[0])
-		content := parts[1]
+		encodedContent := parts[1]
+
+		// Decode Base64 content
+		content, err := base64.StdEncoding.DecodeString(encodedContent)
+		if err != nil {
+			log.Printf("failed to decode Base64 content: %v\n", err)
+			return
+		}
 
 		// Create the file (if it doesn't exist)
-		err := createFile(destPath)
+		err = createFile(destPath)
 		if err != nil {
 			log.Printf("Failed to create file: %v\n", err)
 			return
@@ -129,7 +137,7 @@ func createFile(filePath string) error {
 }
 
 // Function to write content to the file
-func writeFileContent(filePath, content string) error {
+func writeFileContent(filePath string, content []byte) error {
 	// Ensure the directory structure exists
 	dir := filepath.Dir(filePath)
 	err := os.MkdirAll(dir, 0755)
@@ -145,7 +153,7 @@ func writeFileContent(filePath, content string) error {
 	defer file.Close()
 
 	// Write the content to the file
-	_, err = file.WriteString(content)
+	_, err = file.Write(content)
 	if err != nil {
 		return fmt.Errorf("failed to write content to file %s: %v", filePath, err)
 	}

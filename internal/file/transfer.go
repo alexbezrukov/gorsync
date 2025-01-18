@@ -2,6 +2,7 @@ package file
 
 import (
 	"bufio"
+	"encoding/base64"
 	"fmt"
 	"gorsync/pkg/utils"
 	"io"
@@ -50,7 +51,10 @@ func SendDirectory(conn net.Conn, sourceDir, destAddr string, recursive bool) er
 			if err != nil {
 				return fmt.Errorf("failed to read file: %v", err)
 			}
-			event := fmt.Sprintf("CREATE_FILE|%s|%s\n", relPath, string(content))
+
+			encodedContent := base64.StdEncoding.EncodeToString(content)
+
+			event := fmt.Sprintf("CREATE_FILE|%s|%s\n", relPath, encodedContent)
 			_, err = conn.Write([]byte(event))
 			if err != nil {
 				return fmt.Errorf("failed to send file content: %v", err)

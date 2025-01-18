@@ -1,5 +1,5 @@
 # Project settings
-APP_NAME = file-sync
+APP_NAME = gorsync
 BUILD_DIR = build
 SOURCE_DIR = .
 
