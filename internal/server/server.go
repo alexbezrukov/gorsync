@@ -51,6 +51,9 @@ func handleConnection(conn net.Conn, destDir string) {
 	defer conn.Close()
 
 	scanner := bufio.NewScanner(conn)
+	buf := make([]byte, 0, chunkSize) // Increase buffer size (1 MB)
+	scanner.Buffer(buf, 10*1024*1024) // Set the maximum size (10 MB)
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.SplitN(line, "|", 2)
@@ -64,10 +67,10 @@ func handleConnection(conn net.Conn, destDir string) {
 			Payload: parts[1],
 		}
 
-		log.Printf("Received event: %v\n", event)
+		// log.Printf("Received event: %v\n", event)
 
 		// Process the event (add to queue or handle directly)
-		processEvent(event, conn, destDir)
+		processEvent(event, destDir)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -75,7 +78,7 @@ func handleConnection(conn net.Conn, destDir string) {
 	}
 }
 
-func processEvent(event Event, conn net.Conn, destDir string) {
+func processEvent(event Event, destDir string) {
 	switch event.Type {
 	case "CREATE_DIR":
 		// Handle directory creation
@@ -97,14 +100,14 @@ func processEvent(event Event, conn net.Conn, destDir string) {
 	case "WRITE_FILE":
 		// For chunked file transfer, handle inside the corresponding WRITE_FILE event logic
 		// The handling is moved to receiveFileChunks for efficiency
-		receiveFileChunks(event, conn, destDir)
+		receiveFileChunks(event, destDir)
 	default:
 		log.Printf("Unknown event type: %s\n", event.Type)
 	}
 }
 
 // receiveFileChunks listens for file chunks and writes them to the destination file
-func receiveFileChunks(event Event, conn net.Conn, destDir string) {
+func receiveFileChunks(event Event, destDir string) {
 	// Split the line into file path and content (in hexadecimal)
 	parts := strings.SplitN(event.Payload, "|", 2)
 	if len(parts) != 2 {

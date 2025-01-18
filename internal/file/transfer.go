@@ -41,6 +41,11 @@ func SendDirectory(conn net.Conn, sourceDir, destAddr string, recursive bool) er
 			return fmt.Errorf("failed to get relative path: %v", err)
 		}
 
+		// Skip the base directory if it's recursive
+		if relPath == "." {
+			return nil
+		}
+
 		if info.IsDir() {
 			// Send directory creation event
 			event := fmt.Sprintf("CREATE_DIR|%s\n", relPath)
@@ -91,29 +96,29 @@ func SendDirectory(conn net.Conn, sourceDir, destAddr string, recursive bool) er
 	return nil
 }
 
-func sendFile(filePath, relPath string, conn net.Conn) error {
-	// Open the file
-	file, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
+// func sendFile(filePath, relPath string, conn net.Conn) error {
+// 	// Open the file
+// 	file, err := os.Open(filePath)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to open file: %w", err)
+// 	}
+// 	defer file.Close()
 
-	// Notify the server about the file creation
-	fileMessage := fmt.Sprintf("CREATE_FILE|%s", relPath)
-	_, err = conn.Write([]byte(fileMessage + "\n"))
-	if err != nil {
-		return fmt.Errorf("failed to send file creation message: %w", err)
-	}
+// 	// Notify the server about the file creation
+// 	fileMessage := fmt.Sprintf("CREATE_FILE|%s", relPath)
+// 	_, err = conn.Write([]byte(fileMessage + "\n"))
+// 	if err != nil {
+// 		return fmt.Errorf("failed to send file creation message: %w", err)
+// 	}
 
-	// Send the file content
-	_, err = io.Copy(conn, file)
-	if err != nil {
-		return fmt.Errorf("failed to send file content: %w", err)
-	}
+// 	// Send the file content
+// 	_, err = io.Copy(conn, file)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to send file content: %w", err)
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
 // sendFile sends a single file to the server with its relative path.
 // func sendFile(filePath, relPath string, conn net.Conn) error {
