@@ -11,6 +11,8 @@ import (
 	"strings"
 )
 
+const chunkSize = 1024 * 1024 // 1MB chunk size for file transfer
+
 // SendDirectory synchronizes a directory to the server.
 func SendDirectory(conn net.Conn, sourceDir, destAddr string, recursive bool) error {
 	// Validate the source directory
@@ -28,10 +30,12 @@ func SendDirectory(conn net.Conn, sourceDir, destAddr string, recursive bool) er
 			return fmt.Errorf("error accessing file: %v", err)
 		}
 
+		// Skip directories if recursion is not enabled
 		if info.IsDir() && !recursive {
 			return nil
 		}
 
+		// Get the relative path of the file/directory
 		relPath, err := filepath.Rel(sourceDir, path)
 		if err != nil {
 			return fmt.Errorf("failed to get relative path: %v", err)
@@ -45,28 +49,34 @@ func SendDirectory(conn net.Conn, sourceDir, destAddr string, recursive bool) er
 				return fmt.Errorf("failed to send directory event: %v", err)
 			}
 		} else {
+			// Send file creation event
 			event := fmt.Sprintf("CREATE_FILE|%s\n", relPath)
 			_, err := conn.Write([]byte(event))
 			if err != nil {
 				return fmt.Errorf("failed to send file event: %v", err)
 			}
 
-			// Send the file content in chunks
-			content, err := os.ReadFile(path)
+			// Open the file for reading
+			file, err := os.Open(path)
 			if err != nil {
-				return fmt.Errorf("failed to read file: %v", err)
+				return fmt.Errorf("failed to open file: %v", err)
 			}
+			defer file.Close()
 
-			// Send the file content in chunks
-			chunkSize := 1024 // Example chunk size
-			for i := 0; i < len(content); i += chunkSize {
-				end := i + chunkSize
-				if end > len(content) {
-					end = len(content)
+			// Read the file in chunks and send the content
+			buffer := make([]byte, chunkSize)
+			for {
+				bytesRead, err := file.Read(buffer)
+				if err != nil && err != io.EOF {
+					return fmt.Errorf("failed to read file: %v", err)
 				}
-				chunk := content[i:end]
-				event = fmt.Sprintf("WRITE_FILE|%s|%s\n", relPath, string(chunk)) // Send the chunk
-				_, err := conn.Write([]byte(event))
+				if bytesRead == 0 {
+					break // File completely read
+				}
+
+				// Send the chunk as a part of the file content
+				event := fmt.Sprintf("WRITE_FILE|%s|%x\n", relPath, buffer[:bytesRead]) // Send chunk in hexadecimal
+				_, err = conn.Write([]byte(event))
 				if err != nil {
 					return fmt.Errorf("failed to send file chunk: %v", err)
 				}

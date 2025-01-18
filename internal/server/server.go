@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"encoding/hex"
 	"fmt"
 	"gorsync/pkg/utils"
 	"log"
@@ -15,6 +16,8 @@ type Event struct {
 	Type    string // e.g., "CREATE_DIR", "CREATE_FILE", "SEND_FILE_CONTENT"
 	Payload string // Directory or file name, or file content
 }
+
+const chunkSize = 1024 * 1024 // 1MB chunk size for file transfer
 
 func Start(address, destDir string) error {
 	utils.InitLogger()
@@ -64,7 +67,7 @@ func handleConnection(conn net.Conn, destDir string) {
 		log.Printf("Received event: %v\n", event)
 
 		// Process the event (add to queue or handle directly)
-		processEvent(event, destDir)
+		processEvent(event, conn, destDir)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -72,22 +75,19 @@ func handleConnection(conn net.Conn, destDir string) {
 	}
 }
 
-func processEvent(event Event, destDir string) {
+func processEvent(event Event, conn net.Conn, destDir string) {
 	switch event.Type {
 	case "CREATE_DIR":
 		// Handle directory creation
-		// log.Printf("Processing CREATE_DIR: %s\n", destPath)
 		destPath := filepath.Join(destDir, event.Payload)
-
 		err := os.MkdirAll(destPath, 0755)
 		if err != nil {
 			log.Printf("Failed to create directory: %v\n", err)
 		} else {
 			log.Printf("Created directory: %s\n", destPath)
 		}
-
 	case "CREATE_FILE":
-		// Create the file and write the content
+		// Create the file and prepare for content writing
 		destPath := filepath.Join(destDir, event.Payload)
 		err := createFile(destPath)
 		if err != nil {
@@ -95,59 +95,48 @@ func processEvent(event Event, destDir string) {
 			return
 		}
 	case "WRITE_FILE":
-		parts := strings.SplitN(event.Payload, "|", 2)
-		if len(parts) != 2 {
-			log.Printf("invalid message format of write event: %s\n", event.Payload)
-			return
-		}
-
-		destPath := filepath.Join(destDir, parts[0])
-		content := parts[1]
-
-		// Write content to file (append mode)
-		err := writeFileContent(destPath, []byte(content))
-		if err != nil {
-			log.Printf("Failed to write file content: %v\n", err)
-		} else {
-			log.Printf("Written content to file: %s\n", destPath)
-		}
-
+		// For chunked file transfer, handle inside the corresponding WRITE_FILE event logic
+		// The handling is moved to receiveFileChunks for efficiency
+		receiveFileChunks(event, conn, destDir)
 	default:
 		log.Printf("Unknown event type: %s\n", event.Type)
 	}
 }
 
-// Function to create the file
-func createFile(filePath string) error {
-	file, err := os.Create(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to create file %s: %v", filePath, err)
-	}
-	defer file.Close()
-	return nil
-}
-
-// Function to write content to the file
-func writeFileContent(filePath string, content []byte) error {
-	// Ensure the directory structure exists
-	dir := filepath.Dir(filePath)
-	err := os.MkdirAll(dir, 0755)
-	if err != nil {
-		return fmt.Errorf("failed to create directories for file %s: %v", filePath, err)
+// receiveFileChunks listens for file chunks and writes them to the destination file
+func receiveFileChunks(event Event, conn net.Conn, destDir string) {
+	// Split the line into file path and content (in hexadecimal)
+	parts := strings.SplitN(event.Payload, "|", 2)
+	if len(parts) != 2 {
+		log.Printf("invalid chunk format: %s\n", event.Payload)
 	}
 
-	// Open the file for writing
-	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	chank := parts[1]
+	destPath := filepath.Join(destDir, parts[0])
+
+	file, err := os.OpenFile(destPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		return fmt.Errorf("failed to open file %s: %v", filePath, err)
+		log.Printf("Failed to open file for writing: %v\n", err)
+		return
 	}
 	defer file.Close()
 
-	// Write the content to the file
+	content, err := hex.DecodeString(chank)
+	if err != nil {
+		log.Printf("Failed to decode chunk: %v\n", err)
+		return
+	}
+
+	// Write the decoded content to the file
 	_, err = file.Write(content)
 	if err != nil {
-		return fmt.Errorf("failed to write content to file %s: %v", filePath, err)
+		log.Printf("Failed to write file chunk: %v\n", err)
+		return
 	}
+}
 
-	return nil
+// createFile ensures the file is created before writing content
+func createFile(path string) error {
+	_, err := os.Create(path)
+	return err
 }
