@@ -88,15 +88,13 @@ func processEvent(event Event, destDir string, conn net.Conn) {
 	switch event.Type {
 	case "CREATE_DIR":
 		destPath := filepath.Join(destDir, event.Payload)
-		if _, err := os.Stat(destPath); !os.IsNotExist(err) {
+		if _, err := os.Stat(destPath); os.IsNotExist(err) {
 			err := os.MkdirAll(destPath, 0755)
 			if err != nil {
 				log.Printf("Failed to create directory: %v\n", err)
 			} else {
 				log.Printf("Created directory: %s\n", destPath)
 			}
-		} else {
-			log.Printf("Error checking directory: %v\n", err)
 		}
 	case "CHECK_HASH":
 		// Extract client hash
