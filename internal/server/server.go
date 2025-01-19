@@ -72,10 +72,6 @@ func handleConnection(conn net.Conn, destDir string) {
 		// Process the event (add to queue or handle directly)
 		processEvent(event, destDir)
 	}
-
-	if err := scanner.Err(); err != nil {
-		log.Printf("error reading from connection: %v\n", err)
-	}
 }
 
 func processEvent(event Event, destDir string) {

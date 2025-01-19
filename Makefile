@@ -40,7 +40,7 @@ build-linux:
 
 build-windows:
 	@echo "Building Windows binary..."
-	GOOS=windows GOARCH=amd64 $(GO) build -o $(BINARY_WINDOWS) $(SOURCE_DIR)/main.go
+	$(GO) build -o $(BINARY_WINDOWS) $(SOURCE_DIR)/main.go
 
 build-macos:
 	@echo "Building macOS binary..."
