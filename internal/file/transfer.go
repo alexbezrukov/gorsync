@@ -54,9 +54,35 @@ func SendDirectory(conn net.Conn, sourceDir, destAddr string, recursive bool) er
 				return fmt.Errorf("failed to send directory event: %v", err)
 			}
 		} else {
+			// Calculate file hash
+			fileHash, err := utils.CalculateFileHash(path)
+			if err != nil {
+				return fmt.Errorf("failed to calculate file hash: %v", err)
+			}
+
+			// Send file hash and path to server
+			event := fmt.Sprintf("CHECK_HASH|%s|%s\n", relPath, fileHash)
+			_, err = conn.Write([]byte(event))
+			if err != nil {
+				return fmt.Errorf("failed to send file hash: %v", err)
+			}
+
+			// Read server's response
+			response := make([]byte, 1024)
+			n, err := conn.Read(response)
+			if err != nil {
+				return fmt.Errorf("failed to read server response: %v", err)
+			}
+
+			serverResponse := string(response[:n])
+			if serverResponse == "SKIP\n" {
+				fmt.Printf("Server indicated to skip file: %s\n", relPath)
+				return nil // Skip the file if the server hash matches
+			}
+
 			// Send file creation event
-			event := fmt.Sprintf("CREATE_FILE|%s\n", relPath)
-			_, err := conn.Write([]byte(event))
+			event = fmt.Sprintf("CREATE_FILE|%s\n", relPath)
+			_, err = conn.Write([]byte(event))
 			if err != nil {
 				return fmt.Errorf("failed to send file event: %v", err)
 			}

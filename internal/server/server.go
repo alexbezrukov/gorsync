@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type Event struct {
@@ -19,6 +20,12 @@ type Event struct {
 
 const chunkSize = 1024 * 1024 // 1MB chunk size for file transfer
 
+// Memory store to hold file hashes
+var fileHashStore = struct {
+	sync.RWMutex
+	hashes map[string]string
+}{hashes: make(map[string]string)}
+
 func Start(address, destDir string) error {
 	utils.InitLogger()
 
@@ -27,6 +34,11 @@ func Start(address, destDir string) error {
 		if err := os.MkdirAll(destDir, 0755); err != nil {
 			return fmt.Errorf("failed to create destination directory: %v", err)
 		}
+	}
+
+	// Precompute hashes for files in the directory
+	if err := calculateAndStoreHashes(destDir); err != nil {
+		return fmt.Errorf("failed to calculate file hashes: %v", err)
 	}
 
 	listener, err := net.Listen("tcp", address)
@@ -70,11 +82,11 @@ func handleConnection(conn net.Conn, destDir string) {
 		log.Printf("Received event type: %v\n", event.Type)
 
 		// Process the event (add to queue or handle directly)
-		processEvent(event, destDir)
+		processEvent(event, destDir, conn)
 	}
 }
 
-func processEvent(event Event, destDir string) {
+func processEvent(event Event, destDir string, conn net.Conn) {
 	switch event.Type {
 	case "CREATE_DIR":
 		// Handle directory creation
@@ -85,6 +97,30 @@ func processEvent(event Event, destDir string) {
 		} else {
 			log.Printf("Created directory: %s\n", destPath)
 		}
+	case "CHECK_HASH":
+		// Extract client hash
+		parts := strings.SplitN(event.Payload, "|", 2)
+		if len(parts) != 2 {
+			log.Printf("Invalid CHECK_HASH message: %s\n", event.Payload)
+			return
+		}
+
+		relPath := parts[0]
+		hash := parts[1]
+		clientHash := strings.TrimSpace(hash)
+
+		// Compare with memory store
+		fileHashStore.RLock()
+		serverHash, exists := fileHashStore.hashes[filepath.Join(destDir, relPath)]
+		fileHashStore.RUnlock()
+
+		if exists && serverHash == clientHash {
+			// Send "SKIP" response
+			_, _ = conn.Write([]byte("SKIP\n"))
+		} else {
+			// Send "UPLOAD" response
+			_, _ = conn.Write([]byte("UPLOAD\n"))
+		}
 	case "CREATE_FILE":
 		// Create the file and prepare for content writing
 		destPath := filepath.Join(destDir, event.Payload)
@@ -94,8 +130,6 @@ func processEvent(event Event, destDir string) {
 			return
 		}
 	case "WRITE_FILE":
-		// For chunked file transfer, handle inside the corresponding WRITE_FILE event logic
-		// The handling is moved to receiveFileChunks for efficiency
 		receiveFileChunks(event, destDir)
 	default:
 		log.Printf("Unknown event type: %s\n", event.Type)
@@ -137,5 +171,34 @@ func receiveFileChunks(event Event, destDir string) {
 // createFile ensures the file is created before writing content
 func createFile(path string) error {
 	_, err := os.Create(path)
+	return err
+}
+
+// calculateAndStoreHashes calculates and stores hashes for all files in the directory.
+func calculateAndStoreHashes(dirPath string) error {
+	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return fmt.Errorf("error accessing path %s: %v", path, err)
+		}
+
+		// Skip directories
+		if info.IsDir() {
+			return nil
+		}
+
+		hash, err := utils.CalculateFileHash(path)
+		if err != nil {
+			return fmt.Errorf("error calculating hash for file %s: %v", path, err)
+		}
+
+		// Store the hash in the memory store
+		fileHashStore.Lock()
+		fileHashStore.hashes[path] = hash
+		fileHashStore.Unlock()
+
+		fmt.Printf("Calculated hash for file %s: %s\n", path, hash)
+		return nil
+	})
+
 	return err
 }
