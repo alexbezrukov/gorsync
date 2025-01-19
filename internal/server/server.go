@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Event struct {
@@ -64,11 +65,25 @@ func Start(address, destDir string) error {
 func handleConnection(conn net.Conn, destDir string) {
 	defer conn.Close()
 
+	// Set a deadline for the connection to detect inactivity
+	err := conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if err != nil {
+		log.Printf("exit after inactivity deadline: %v\n", err)
+		return
+	}
+
 	scanner := bufio.NewScanner(conn)
 	buf := make([]byte, 0, chunkSize) // Increase buffer size (1 MB)
 	scanner.Buffer(buf, 10*1024*1024) // Set the maximum size (10 MB)
 
 	for scanner.Scan() {
+		// Set a deadline for the connection to detect inactivity
+		err := conn.SetDeadline(time.Now().Add(10 * time.Second))
+		if err != nil {
+			log.Printf("exit after inactivity deadline: %v\n", err)
+			return
+		}
+
 		line := scanner.Text()
 		parts := strings.SplitN(line, "|", 2)
 		if len(parts) != 2 {
@@ -85,14 +100,18 @@ func handleConnection(conn net.Conn, destDir string) {
 		processEvent(event, destDir, conn)
 	}
 
-	// Check for EOF or other errors
+	// Handle end of connection or timeout
 	if err := scanner.Err(); err != nil {
 		if errors.Is(err, io.EOF) {
 			log.Println("Client disconnected; shutting down server.")
-			os.Exit(0) // Exit the server
+		} else if os.IsTimeout(err) {
+			log.Println("Connection timed out due to inactivity.")
 		} else {
 			log.Printf("Connection error: %v\n", err)
 		}
+		os.Exit(0) // Exit the server
+	} else {
+		log.Println("Scanner stopped without error.")
 	}
 }
 
