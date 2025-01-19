@@ -66,11 +66,7 @@ func handleConnection(conn net.Conn, destDir string) {
 	defer conn.Close()
 
 	// Set a deadline for the connection to detect inactivity
-	err := conn.SetDeadline(time.Now().Add(10 * time.Second))
-	if err != nil {
-		log.Printf("exit after inactivity deadline: %v\n", err)
-		return
-	}
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
 	scanner := bufio.NewScanner(conn)
 	buf := make([]byte, 0, chunkSize) // Increase buffer size (1 MB)
@@ -78,11 +74,7 @@ func handleConnection(conn net.Conn, destDir string) {
 
 	for scanner.Scan() {
 		// Set a deadline for the connection to detect inactivity
-		err := conn.SetDeadline(time.Now().Add(10 * time.Second))
-		if err != nil {
-			log.Printf("exit after inactivity deadline: %v\n", err)
-			return
-		}
+		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
 		line := scanner.Text()
 		parts := strings.SplitN(line, "|", 2)
@@ -112,6 +104,7 @@ func handleConnection(conn net.Conn, destDir string) {
 		os.Exit(0) // Exit the server
 	} else {
 		log.Println("Scanner stopped without error.")
+		os.Exit(0)
 	}
 }
 
