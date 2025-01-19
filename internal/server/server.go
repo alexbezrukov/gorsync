@@ -67,7 +67,7 @@ func handleConnection(conn net.Conn, destDir string) {
 			Payload: parts[1],
 		}
 
-		// log.Printf("Received event: %v\n", event)
+		log.Printf("Received event type: %v\n", event.Type)
 
 		// Process the event (add to queue or handle directly)
 		processEvent(event, destDir)
