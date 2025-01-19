@@ -76,7 +76,6 @@ func SendDirectory(conn net.Conn, sourceDir, destAddr string, recursive bool) er
 
 			serverResponse := string(response[:n])
 			if serverResponse == "SKIP\n" {
-				fmt.Printf("Server indicated to skip file: %s\n", relPath)
 				return nil // Skip the file if the server hash matches
 			}
 
