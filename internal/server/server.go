@@ -3,8 +3,10 @@ package server
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"gorsync/pkg/utils"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -82,18 +84,29 @@ func handleConnection(conn net.Conn, destDir string) {
 		// Process the event (add to queue or handle directly)
 		processEvent(event, destDir, conn)
 	}
+
+	// Check for EOF or other errors
+	if err := scanner.Err(); err != nil {
+		if errors.Is(err, io.EOF) {
+			log.Println("Client disconnected; shutting down server.")
+			os.Exit(0) // Exit the server
+		} else {
+			log.Printf("Connection error: %v\n", err)
+		}
+	}
 }
 
 func processEvent(event Event, destDir string, conn net.Conn) {
 	switch event.Type {
 	case "CREATE_DIR":
 		destPath := filepath.Join(destDir, event.Payload)
-		if _, err := os.Stat(destPath); os.IsNotExist(err) {
-			err := os.MkdirAll(destPath, 0755)
-			if err != nil {
-				log.Printf("Failed to create directory: %v\n", err)
+		if _, err := os.Stat(destPath); err != nil {
+			if os.IsNotExist(err) {
+				if mkdirErr := os.MkdirAll(destPath, 0755); mkdirErr != nil {
+					log.Printf("Failed to create directory: %s, error: %v\n", destPath, mkdirErr)
+				}
 			} else {
-				log.Printf("Created directory: %s\n", destPath)
+				log.Printf("Error checking directory: %s, error: %v\n", destPath, err)
 			}
 		}
 	case "CHECK_HASH":
@@ -199,7 +212,6 @@ func calculateAndStoreHashes(dirPath string) error {
 		fileHashStore.hashes[path] = hash
 		fileHashStore.Unlock()
 
-		fmt.Printf("Calculated hash for file %s: %s\n", path, hash)
 		return nil
 	})
 
