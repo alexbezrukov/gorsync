@@ -79,8 +79,6 @@ func handleConnection(conn net.Conn, destDir string) {
 			Payload: parts[1],
 		}
 
-		log.Printf("Received event type: %v\n", event.Type)
-
 		// Process the event (add to queue or handle directly)
 		processEvent(event, destDir, conn)
 	}
@@ -89,13 +87,19 @@ func handleConnection(conn net.Conn, destDir string) {
 func processEvent(event Event, destDir string, conn net.Conn) {
 	switch event.Type {
 	case "CREATE_DIR":
-		// Handle directory creation
 		destPath := filepath.Join(destDir, event.Payload)
-		err := os.MkdirAll(destPath, 0755)
-		if err != nil {
-			log.Printf("Failed to create directory: %v\n", err)
+		if _, err := os.Stat(destPath); err == nil {
+			log.Printf("Directory already exists: %s\n", destPath)
+		} else if os.IsNotExist(err) {
+			// Directory does not exist, create it
+			err := os.MkdirAll(destPath, 0755)
+			if err != nil {
+				log.Printf("Failed to create directory: %v\n", err)
+			} else {
+				log.Printf("Created directory: %s\n", destPath)
+			}
 		} else {
-			log.Printf("Created directory: %s\n", destPath)
+			log.Printf("Error checking directory: %v\n", err)
 		}
 	case "CHECK_HASH":
 		// Extract client hash
@@ -128,6 +132,8 @@ func processEvent(event Event, destDir string, conn net.Conn) {
 		if err != nil {
 			log.Printf("Failed to create file: %v\n", err)
 			return
+		} else {
+			log.Printf("Created file: %s\n", destPath)
 		}
 	case "WRITE_FILE":
 		receiveFileChunks(event, destDir)
@@ -166,6 +172,8 @@ func receiveFileChunks(event Event, destDir string) {
 		log.Printf("Failed to write file chunk: %v\n", err)
 		return
 	}
+
+	log.Printf("Writed to file: %s\n", destPath)
 }
 
 // createFile ensures the file is created before writing content
