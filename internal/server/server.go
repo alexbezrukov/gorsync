@@ -33,7 +33,7 @@ type FileMetadata struct {
 	Path      string    `json:"path"`
 	Size      int64     `json:"size"`
 	ModTime   time.Time `json:"mod_time"`
-	ChackSum  string    `json:"checksum"`
+	CheckSum  string    `json:"checksum"`
 	IsDeleted bool      `json:"is_deleted"`
 }
 
@@ -68,7 +68,6 @@ func NewSyncServer(deviceID string, port int, syncDir string, peers map[string]s
 }
 
 func (s *SyncServer) Start() error {
-	// Initialize the file watcher
 	var err error
 	s.watcher, err = fsnotify.NewWatcher()
 	if err != nil {
@@ -76,7 +75,6 @@ func (s *SyncServer) Start() error {
 	}
 	defer s.watcher.Close()
 
-	// Start watching for file changes
 	go s.watchFileChanges()
 
 	// Add the sync directory and all subdirectories to the watcher
@@ -142,7 +140,6 @@ func (s *SyncServer) addDirsToWatcher(root string) error {
 
 // Update watchFileChanges to also check ignore patterns
 func (s *SyncServer) watchFileChanges() {
-	// Get ignore patterns from config
 	ignorePatterns := viper.GetStringSlice("ignore_patterns")
 
 	for {
@@ -152,18 +149,21 @@ func (s *SyncServer) watchFileChanges() {
 				return
 			}
 
-			// Skip ignored files
+			fmt.Println("event", event)
+
 			if shouldIgnoreFile(event.Name, ignorePatterns) {
 				log.Printf("Ignoring event for: %s", event.Name)
 				continue
 			}
 
-			// Get relative path
 			relPath, err := filepath.Rel(s.syncDir, event.Name)
 			if err != nil {
 				log.Printf("Failed to get relative path for %s: %v", event.Name, err)
 				continue
 			}
+
+			// Normalize path to use forward slashes for consistency across platforms
+			relPath = filepath.ToSlash(relPath)
 
 			log.Printf("File event: %s %s", event.Op.String(), relPath)
 
@@ -211,12 +211,11 @@ func (s *SyncServer) watchFileChanges() {
 	}
 }
 
-// Helper function to check if a file should be ignored (for reuse)
+// Helper function to check if a file should be ignored
 func shouldIgnoreFile(path string, ignorePatterns []string) bool {
 	// Get base name for matching against patterns
 	base := filepath.Base(path)
 
-	// Check if the path matches any ignore pattern
 	for _, pattern := range ignorePatterns {
 		matched, err := filepath.Match(pattern, base)
 		if err != nil {
@@ -257,7 +256,7 @@ func (s *SyncServer) updateFileMetadata(relPath string, isDeleted bool) {
 			Path:      relPath,
 			Size:      info.Size(),
 			ModTime:   info.ModTime(),
-			ChackSum:  checksum,
+			CheckSum:  checksum,
 			IsDeleted: isDeleted,
 		}
 
@@ -278,13 +277,39 @@ func (s *SyncServer) initializeMetadata() error {
 	// Get ignore patterns from config
 	ignorePatterns := viper.GetStringSlice("ignore_patterns")
 
+	// Create a file matcher function
+	shouldIgnore := func(path string) bool {
+		// Get base name for matching against patterns
+		base := filepath.Base(path)
+
+		// Check if the path matches any ignore pattern
+		for _, pattern := range ignorePatterns {
+			matched, err := filepath.Match(pattern, base)
+			if err != nil {
+				log.Printf("Invalid pattern %s: %v", pattern, err)
+				continue
+			}
+
+			if matched {
+				return true
+			}
+
+			// Also check for directory matches (for directories like node_modules)
+			if strings.Contains(path, string(filepath.Separator)+pattern+string(filepath.Separator)) ||
+				strings.HasSuffix(path, string(filepath.Separator)+pattern) {
+				return true
+			}
+		}
+		return false
+	}
+
 	return filepath.Walk(s.syncDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
 		// Skip the path if it should be ignored
-		if shouldIgnoreFile(path, ignorePatterns) {
+		if shouldIgnore(path) {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
@@ -297,6 +322,9 @@ func (s *SyncServer) initializeMetadata() error {
 				return err
 			}
 
+			// Normalize path to use forward slashes for consistency across platforms
+			relPath = filepath.ToSlash(relPath)
+
 			checksum, err := calculateChecksum(path)
 			if err != nil {
 				return err
@@ -307,7 +335,7 @@ func (s *SyncServer) initializeMetadata() error {
 				Path:     relPath,
 				Size:     info.Size(),
 				ModTime:  info.ModTime(),
-				ChackSum: checksum,
+				CheckSum: checksum,
 			}
 			s.metadataLock.Unlock()
 		}
@@ -396,13 +424,12 @@ func (s *SyncServer) handleConnection(conn net.Conn) {
 	peerID := handshakeResponse.DeviceID
 	log.Printf("Handshake successful with peer: %s", peerID)
 
-	// Check if we already have a connection to this peer - using a smaller lock scope
+	// Check if we already have a connection to this peer
 	var duplicateConnection bool
 	s.connLock.Lock()
 	if _, exists := s.connections[peerID]; exists {
 		duplicateConnection = true
 	} else {
-		// Store the connection with its encoder/decoder
 		s.connections[peerID] = &Connection{
 			conn:    conn,
 			encoder: encoder,
@@ -445,7 +472,7 @@ func (s *SyncServer) handleConnection(conn net.Conn) {
 		}
 	}
 
-	// Remove connection when the loop exits - using a smaller lock scope
+	// Remove connection when the loop exits
 	s.connLock.Lock()
 	delete(s.connections, peerID)
 	s.connLock.Unlock()
@@ -507,28 +534,22 @@ func (s *SyncServer) handleFileData(msg SyncMessage) {
 		return
 	}
 
-	tempPath := path + ".tmp"
-	if err := os.WriteFile(tempPath, msg.Data, 0644); err != nil {
-		log.Printf("Failed to write temporary file %s: %v", tempPath, err)
-	}
-
-	match, err := s.verifyChecksum(tempPath, msg.Metadata.ChackSum)
-	if err != nil {
-		log.Printf("Failed to verify checksum for %s: %v", tempPath, err)
-		os.Remove(tempPath)
+	match, err := s.verifyChecksum(path, msg.Metadata.CheckSum)
+	if err == nil && match {
+		// File already exists and matches checksum, no need to write
 		return
 	}
 
-	if !match {
+	if err := os.WriteFile(path, msg.Data, 0644); err != nil {
+		log.Printf("Failed to write file %s: %v", path, err)
+		return
+	}
+
+	match, err = s.verifyChecksum(path, msg.Metadata.CheckSum)
+	if err != nil || !match {
 		log.Printf("Checksum mismatch for file %s", msg.Metadata.Path)
-		os.Remove(tempPath)
+		os.Remove(path)
 		s.requestFile(msg.DeviceID, msg.Metadata)
-		return
-	}
-
-	if err := os.Rename(tempPath, path); err != nil {
-		log.Printf("Failed tp move file to final location %s: %v", path, err)
-		os.Remove(tempPath)
 		return
 	}
 
@@ -536,7 +557,11 @@ func (s *SyncServer) handleFileData(msg SyncMessage) {
 	s.metadata[msg.Metadata.Path] = msg.Metadata
 	s.metadataLock.Unlock()
 
-	s.broadcastMetadata(msg.Metadata)
+	// We only broadcast metadata if WE made the change
+	// Avoids endless synchronization loops
+	if msg.DeviceID == s.deviceID {
+		s.broadcastMetadata(msg.Metadata)
+	}
 }
 
 func (s *SyncServer) requestFile(deviceID string, metadata FileMetadata) {
@@ -554,8 +579,6 @@ func (s *SyncServer) requestFile(deviceID string, metadata FileMetadata) {
 		DeviceID: s.deviceID,
 		Metadata: metadata,
 	}
-
-	fmt.Println("Send file_request")
 
 	if err := connection.encoder.Encode(request); err != nil {
 		log.Printf("Failed to  send file request: %v", err)
