@@ -1,7 +1,7 @@
 # Project settings
 APP_NAME = gorsync
 BUILD_DIR = build
-SOURCE_DIR = .
+SOURCE_DIR = cmd
 
 # Default Go settings
 GO ?= go
@@ -15,7 +15,7 @@ BINARY_MACOS = $(BUILD_DIR)/$(APP_NAME)-darwin
 .PHONY: all build clean run test
 
 # Default target
-all: build
+all: build-all
 
 # Build the application for the current platform
 build:
@@ -59,4 +59,5 @@ test:
 clean:
 	@echo "Cleaning up..."
 	rm -rf $(BUILD_DIR)
+	rm -rf config.yaml
 	@echo "Clean complete."
