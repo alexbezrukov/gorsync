@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/gob"
 	"encoding/hex"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/grandcat/zeroconf"
 	"github.com/spf13/viper"
 )
 
@@ -56,18 +58,18 @@ type SyncServer struct {
 	watcher      *fsnotify.Watcher
 }
 
-func NewSyncServer(deviceID string, port int, syncDir string, peers map[string]string) *SyncServer {
+func NewSyncServer(deviceID string, port int, syncDir string) *SyncServer {
 	return &SyncServer{
 		deviceID:    deviceID,
 		port:        port,
 		syncDir:     syncDir,
-		peers:       peers,
+		peers:       make(map[string]string),
 		metadata:    make(map[string]FileMetadata),
 		connections: make(map[string]*Connection),
 	}
 }
 
-func (s *SyncServer) Start() error {
+func (s *SyncServer) Start(ctx context.Context) error {
 	var err error
 	s.watcher, err = fsnotify.NewWatcher()
 	if err != nil {
@@ -94,7 +96,7 @@ func (s *SyncServer) Start() error {
 
 	log.Printf("Server listening on port %d", s.port)
 
-	go s.connectToPeers()
+	go s.connectToPeers(ctx)
 
 	for {
 		conn, err := listener.Accept()
@@ -102,6 +104,22 @@ func (s *SyncServer) Start() error {
 			log.Printf("Failed to accept connection: %v", err)
 			continue
 		}
+
+		// TODO: Why in windows happends connection from 50xxx ports?
+		// Extract the IP address from the remote address and local address
+		remoteAddr, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+		localAddr, _, _ := net.SplitHostPort(conn.LocalAddr().String())
+
+		// Check if the connection is from the same host by comparing IP addresses
+		if remoteAddr == localAddr {
+			// Skip connection from the same host
+			log.Printf("Rejected connection from the same host: %s", conn.RemoteAddr().String())
+			conn.Close()
+			continue
+		}
+
+		fmt.Printf("YEP I ACCEPT CONNECTION: %s\n", conn.RemoteAddr().String())
+
 		go s.handleConnection(conn)
 	}
 }
@@ -148,8 +166,6 @@ func (s *SyncServer) watchFileChanges() {
 			if !ok {
 				return
 			}
-
-			fmt.Println("event", event)
 
 			if shouldIgnoreFile(event.Name, ignorePatterns) {
 				log.Printf("Ignoring event for: %s", event.Name)
@@ -343,52 +359,91 @@ func (s *SyncServer) initializeMetadata() error {
 	})
 }
 
-func (s *SyncServer) connectToPeers() {
+func (s *SyncServer) connectToPeers(ctx context.Context) {
+	resolver, err := zeroconf.NewResolver(nil)
+	if err != nil {
+		log.Fatalf("Failed to initialize mDNS resolver: %v", err)
+	}
+
+	entries := make(chan *zeroconf.ServiceEntry)
+	go s.discoverPeers(entries)
+
+	// Start browsing for peers using mDNS
+	if err := resolver.Browse(ctx, "_peer._tcp", "local.", entries); err != nil {
+		log.Fatalf("Failed to browse mDNS services: %v", err)
+	}
+
+	// Monitor peers and attempt connections periodically
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
 	for {
-		// Create a local copy of peers to avoid locking during iteration
-		s.connLock.RLock()
-		peers := s.peers
-		s.connLock.RUnlock()
+		select {
+		case <-ctx.Done():
+			log.Println("Stopping peer discovery")
+			return
+		case <-ticker.C:
+			s.connectToDiscoveredPeers()
+		}
+	}
+}
 
-		// Retrieve devices from the config
-		configPeers := viper.GetStringMapString("devices")
+// discoverPeers listens for mDNS service entries and updates the peer list.
+func (s *SyncServer) discoverPeers(entries chan *zeroconf.ServiceEntry) {
+	for entry := range entries {
+		if len(entry.AddrIPv4) == 0 {
+			continue
+		}
 
-		// Add peers from config to peers map that are not already present
+		fmt.Println("entry", entry)
+
+		peerID := entry.Instance
+
+		// Ignore self-discovery
+		if peerID == s.deviceID {
+			log.Printf("Ignoring self: %s", peerID)
+			continue
+		}
+
+		address := net.JoinHostPort(entry.AddrIPv4[0].String(), fmt.Sprintf("%d", entry.Port))
+		log.Printf("Discovered Peer: %s at %s", peerID, address)
+
 		s.connLock.Lock()
-		for peerID, addr := range configPeers {
-			if _, exists := peers[peerID]; !exists {
-				peers[peerID] = addr
-			}
+		if _, exists := s.peers[peerID]; !exists {
+			s.peers[peerID] = address
 		}
 		s.connLock.Unlock()
-
-		// Iterate over the current peers and connect if needed
-		for peerID, addr := range peers {
-			go func(id, address string) {
-				// Check if we already have a connection to this peer
-				s.connLock.RLock()
-				if _, exists := s.connections[id]; exists {
-					s.connLock.RUnlock()
-					return
-				}
-				s.connLock.RUnlock()
-
-				// Attempt to connect to the peer
-				conn, err := net.Dial("tcp", address)
-				if err != nil {
-					log.Printf("Failed to connect to peer %s (%s): %v", id, address, err)
-					return
-				}
-
-				// Handle the connection and add it to the connections map after handshake
-				s.handleConnection(conn)
-
-			}(peerID, addr)
-		}
-
-		// Sleep before checking for new peers again
-		time.Sleep(3 * time.Second)
 	}
+}
+
+// connectToDiscoveredPeers iterates over discovered peers and attempts connections.
+func (s *SyncServer) connectToDiscoveredPeers() {
+	s.connLock.RLock()
+	peers := s.peers
+	s.connLock.RUnlock()
+
+	for peerID, addr := range peers {
+		go s.establishConnection(peerID, addr)
+	}
+}
+
+// establishConnection checks for existing connections and attempts to connect to a peer.
+func (s *SyncServer) establishConnection(peerID, address string) {
+	s.connLock.RLock()
+	if _, exists := s.connections[peerID]; exists {
+		s.connLock.RUnlock()
+		return
+	}
+	s.connLock.RUnlock()
+
+	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
+	if err != nil {
+		log.Printf("Failed to connect to peer %s (%s): %v", peerID, address, err)
+		return
+	}
+
+	log.Printf("Connected to peer %s at %s", peerID, address)
+	s.handleConnection(conn)
 }
 
 func (s *SyncServer) handleConnection(conn net.Conn) {
@@ -452,7 +507,7 @@ func (s *SyncServer) handleConnection(conn net.Conn) {
 	// Handle incoming messages
 	for {
 		var msg SyncMessage
-		log.Println("Waiting for incoming message")
+		// log.Println("Waiting for incoming message")
 		if err := decoder.Decode(&msg); err != nil {
 			if err.Error() != "EOF" {
 				log.Printf("Error decoding message from %s: %v", peerID, err)
@@ -483,15 +538,12 @@ func (s *SyncServer) handleMetadataUpdate(msg SyncMessage) {
 	s.metadataLock.Lock()
 	defer s.metadataLock.Unlock()
 
-	log.Println("Request fot metadata")
-
 	localMeta, exists := s.metadata[msg.Metadata.Path]
 	if !exists || localMeta.ModTime.Before(msg.Metadata.ModTime) {
 		if msg.Metadata.IsDeleted {
 			delete(s.metadata, msg.Metadata.Path)
 			os.Remove(filepath.Join(s.syncDir, msg.Metadata.Path))
 		} else {
-			log.Println("Request file")
 			s.requestFile(msg.DeviceID, msg.Metadata)
 		}
 	}
@@ -540,6 +592,7 @@ func (s *SyncServer) handleFileData(msg SyncMessage) {
 		return
 	}
 
+	// sanitizedPath := sanitizeFilename(path)
 	if err := os.WriteFile(path, msg.Data, 0644); err != nil {
 		log.Printf("Failed to write file %s: %v", path, err)
 		return
@@ -562,6 +615,15 @@ func (s *SyncServer) handleFileData(msg SyncMessage) {
 	if msg.DeviceID == s.deviceID {
 		s.broadcastMetadata(msg.Metadata)
 	}
+}
+
+func sanitizeFilename(filename string) string {
+	invalidChars := []string{"?", ":", "*", "<", ">", "|", "\"", "\\", ";"}
+	for _, char := range invalidChars {
+		filename = strings.ReplaceAll(filename, char, "_") // Replace invalid characters with underscores
+	}
+	filename = strings.ReplaceAll(filename, " ", "_") // Replace spaces with underscores
+	return filename
 }
 
 func (s *SyncServer) requestFile(deviceID string, metadata FileMetadata) {

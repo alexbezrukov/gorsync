@@ -1,22 +1,20 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"gorsync/internal/device"
-	"gorsync/internal/model"
+	"gorsync/internal/netinfo"
 	"gorsync/internal/server"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
-	"time"
 
+	"github.com/grandcat/zeroconf"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"golang.org/x/net/ipv4"
 )
 
 var rootCmd = &cobra.Command{
@@ -30,7 +28,6 @@ devices: {}
 sync_directory: "./sync"
 port: 9000
 log_level: "info"
-multicast_address: "224.0.0.1:9999"
 discovery_interval: 5
 ignore_patterns:
   - "*.swp"
@@ -43,6 +40,7 @@ ignore_patterns:
   - "*.~*"
   - "__pycache__"
   - "tmp"
+  - ".obsidian"
 `
 
 func main() {
@@ -97,121 +95,6 @@ var addPeerCmd = &cobra.Command{
 	},
 }
 
-func startAutomaticDiscovery(wg *sync.WaitGroup, deviceID string, port int) {
-	defer wg.Done()
-	go discoveryListener(deviceID)
-	go discoveryBroadcaster(deviceID, port)
-}
-
-func discoveryListener(deviceID string) {
-	addr := viper.GetString("multicast_address")
-	localIP := getLocalIP()
-
-	// Parse multicast address
-	multicastAddr, err := net.ResolveUDPAddr("udp4", addr)
-	if err != nil {
-		log.Printf("Error resolving multicast address: %v", err)
-		return
-	}
-
-	conn, err := net.ListenPacket("udp4", addr)
-	if err != nil {
-		log.Printf("Error starting discovery listener: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	udpConn, ok := conn.(*net.UDPConn)
-	if !ok {
-		log.Println("Error asserting connection to *net.UDPConn")
-		return
-	}
-
-	// Join the multicast group
-	ip := udpConn.LocalAddr().(*net.UDPAddr).IP
-	if ip == nil {
-		log.Println("Local IP address not found")
-		return
-	}
-
-	// Use the `ipv4` package to join the multicast group
-	p := ipv4.NewPacketConn(udpConn)
-	if err := p.JoinGroup(nil, &net.UDPAddr{IP: multicastAddr.IP}); err != nil {
-		log.Printf("Error joining multicast group: %v", err)
-		return
-	}
-
-	log.Println("Listening for peers...")
-	buf := make([]byte, 1024)
-
-	for {
-		n, remoteAddr, err := conn.ReadFrom(buf)
-		if err != nil {
-			log.Printf("Read error: %v", err)
-			continue
-		}
-
-		var peerInfo model.PeerInfo
-		if err := json.Unmarshal(buf[:n], &peerInfo); err != nil {
-			log.Printf("Invalid peer info: %v", err)
-			continue
-		}
-
-		peers := viper.GetStringMapString("devices")
-		_, exist := peers[peerInfo.DeviceID]
-
-		if peerInfo.IP != localIP && peerInfo.DeviceID != deviceID && !exist {
-			log.Printf("Discovered peer: %s (Device ID: %s) at %s:%d",
-				peerInfo.IP, peerInfo.DeviceID, remoteAddr.String(), peerInfo.Port)
-
-			// Add peer to configuration
-			peerAddress := fmt.Sprintf("%s:%d", peerInfo.IP, peerInfo.Port)
-			peers[peerInfo.DeviceID] = peerAddress
-			viper.Set("devices", peers)
-
-			if err := viper.WriteConfig(); err != nil {
-				log.Printf("Failed to save new peer to config: %v", err)
-			}
-		}
-	}
-}
-
-func discoveryBroadcaster(deviceID string, port int) {
-	addr := viper.GetString("multicast_address")
-	localIP := getLocalIP()
-	discoveryInterval := viper.GetDuration("discovery_interval")
-	if discoveryInterval == 0 {
-		discoveryInterval = 30 * time.Second
-	}
-
-	conn, err := net.Dial("udp4", addr)
-	if err != nil {
-		log.Printf("Error creating discovery broadcaster: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	peerInfo := model.PeerInfo{
-		IP:       localIP,
-		Port:     port,
-		DeviceID: deviceID,
-	}
-
-	for {
-		data, err := json.Marshal(peerInfo)
-		if err != nil {
-			log.Printf("Error marshaling peer info: %v", err)
-			continue
-		}
-
-		if _, err := conn.Write(data); err != nil {
-			log.Printf("Error broadcasting discovery: %v", err)
-		}
-
-		time.Sleep(discoveryInterval)
-	}
-}
-
 func getLocalIP() string {
 	interfaces, err := net.Interfaces()
 	if err != nil {
@@ -247,7 +130,17 @@ var startCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the sync service",
 	Run: func(cmd *cobra.Command, args []string) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			fmt.Println("Error getting current directory:", err)
+		} else {
+			fmt.Println("Current working directory:", cwd)
+		}
+
 		fmt.Println("Starting gorsync...")
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
@@ -271,17 +164,55 @@ var startCmd = &cobra.Command{
 
 		port := viper.GetInt("port")
 		syncDir := viper.GetString("sync_directory")
-		peers := viper.GetStringMapString("devices")
 
-		// Start automatic discovery in background
-		var wg sync.WaitGroup
-		wg.Add(1)
-		go startAutomaticDiscovery(&wg, deviceID, port)
+		// Get filtered network interfaces
+		intr, err := netinfo.GetMainInternetInterface()
+		if err != nil {
+			log.Fatalf("Failed to get network interfaces: %v", err)
+		}
+
+		fmt.Println("intr", intr)
+
+		zeroconfServer, err := zeroconf.Register(
+			deviceID,              // Service instance name
+			"_peer._tcp",          // Service type (custom)
+			"local.",              // Service domain
+			port,                  // Port to expose
+			[]string{"txtvers=1"}, // Optional TXT records
+			intr,                  // Use default network interface
+		)
+		if err != nil {
+			log.Fatalf("Failed to register mDNS service: %v", err)
+		}
+		defer zeroconfServer.Shutdown()
+
+		log.Printf("mDNS service '%s' registered on port %d", deviceID, port)
 
 		// Start the sync server
-		server := server.NewSyncServer(deviceID, port, syncDir, peers)
-		if err := server.Start(); err != nil {
+		server := server.NewSyncServer(deviceID, port, syncDir)
+		if err := server.Start(ctx); err != nil {
 			log.Fatal("Server error:", err)
 		}
 	},
 }
+
+// func getSystemInterfaces() ([]netinfo.InterfaceInfo, error) {
+// 	var validInterfaces []netinfo.InterfaceInfo
+
+// 	// Get all network interfaces
+// 	interfaces, err := netinfo.GetAllInterfaces()
+// 	if err != nil {
+// 		log.Fatalf("Error getting interfaces: %v", err)
+// 	}
+
+// 	for _, iface := range interfaces {
+// 		// Exclude WSL-related interfaces
+// 		fmt.Printf("iface: %s, is up: %v\n", iface.Name, iface.IsUp)
+// 		if strings.Contains(iface.Name, "WSL") || strings.Contains(iface.Name, "vEthernet") {
+// 			continue
+// 		}
+// 		validInterfaces = append(validInterfaces, iface)
+// 	}
+
+// 	return validInterfaces, nil
+// }
