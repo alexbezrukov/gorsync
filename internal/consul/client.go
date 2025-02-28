@@ -9,7 +9,7 @@ import (
 	"net/http"
 )
 
-const consulAddress = "http://consul:8500" // Use "localhost:8500" if running locally
+const consulAddress = "http://localhost:8500" // Use "localhost:8500" if running locally
 
 type ConsulClient struct{}
 
@@ -23,15 +23,28 @@ func (c *ConsulClient) RegisterService(serviceID string, port int) error {
 		Name:    "gorsync",
 		Port:    port,
 		Tags:    []string{"sync"},
-		Address: "gorsync",
+		Address: "127.0.0.1",
 	}
 
 	jsonData, _ := json.Marshal(data)
-	resp, err := http.Post(fmt.Sprintf("%s/v1/agent/service/register", consulAddress), "application/json", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest(http.MethodPut, consulAddress, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to register service: %s", resp.Status)
+	}
+
+	log.Println("Service registered successfully")
 
 	log.Printf("Registered service %s in Consul", serviceID)
 	return nil
