@@ -797,3 +797,55 @@ type InterfaceInfo struct {
 // 	}
 // 	return "DOWN"
 // }
+
+// func getSystemInterfaces() ([]netinfo.InterfaceInfo, error) {
+// 	var validInterfaces []netinfo.InterfaceInfo
+
+// 	// Get all network interfaces
+// 	interfaces, err := netinfo.GetAllInterfaces()
+// 	if err != nil {
+// 		log.Fatalf("Error getting interfaces: %v", err)
+// 	}
+
+// 	for _, iface := range interfaces {
+// 		// Exclude WSL-related interfaces
+// 		fmt.Printf("iface: %s, is up: %v\n", iface.Name, iface.IsUp)
+// 		if strings.Contains(iface.Name, "WSL") || strings.Contains(iface.Name, "vEthernet") {
+// 			continue
+// 		}
+// 		validInterfaces = append(validInterfaces, iface)
+// 	}
+
+// 	return validInterfaces, nil
+// }
+
+// func getLocalIP() string {
+// 	interfaces, err := net.Interfaces()
+// 	if err != nil {
+// 		return ""
+// 	}
+
+// 	for _, iface := range interfaces {
+// 		// Ignore down interfaces, loopback, and virtual adapters (e.g., WSL)
+// 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+// 			continue
+// 		}
+
+// 		addrs, err := iface.Addrs()
+// 		if err != nil {
+// 			continue
+// 		}
+
+// 		for _, addr := range addrs {
+// 			if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil {
+// 				ip := ipNet.IP.String()
+// 				// Exclude WSL subnet (e.g., 172.x.x.x)
+// 				if !strings.HasPrefix(ip, "172.") {
+// 					return ip
+// 				}
+// 			}
+// 		}
+// 	}
+
+// 	return ""
+// }

@@ -3,16 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"gorsync/internal/consul"
 	"gorsync/internal/device"
-	"gorsync/internal/netinfo"
 	"gorsync/internal/server"
 	"log"
-	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
-	"strings"
+	"syscall"
 
-	"github.com/grandcat/zeroconf"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -95,48 +94,10 @@ var addPeerCmd = &cobra.Command{
 	},
 }
 
-func getLocalIP() string {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return ""
-	}
-
-	for _, iface := range interfaces {
-		// Ignore down interfaces, loopback, and virtual adapters (e.g., WSL)
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-
-		for _, addr := range addrs {
-			if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil {
-				ip := ipNet.IP.String()
-				// Exclude WSL subnet (e.g., 172.x.x.x)
-				if !strings.HasPrefix(ip, "172.") {
-					return ip
-				}
-			}
-		}
-	}
-
-	return ""
-}
-
 var startCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the sync service",
 	Run: func(cmd *cobra.Command, args []string) {
-		cwd, err := os.Getwd()
-		if err != nil {
-			fmt.Println("Error getting current directory:", err)
-		} else {
-			fmt.Println("Current working directory:", cwd)
-		}
-
 		fmt.Println("Starting gorsync...")
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -165,28 +126,28 @@ var startCmd = &cobra.Command{
 		port := viper.GetInt("port")
 		syncDir := viper.GetString("sync_directory")
 
-		// Get filtered network interfaces
-		intr, err := netinfo.GetMainInternetInterface()
+		// Register service in Consul
+		consulClient, err := consul.NewClient()
 		if err != nil {
-			log.Fatalf("Failed to get network interfaces: %v", err)
+			log.Fatal("Failed to initialize Consul client:", err)
 		}
 
-		fmt.Println("intr", intr)
-
-		zeroconfServer, err := zeroconf.Register(
-			deviceID,              // Service instance name
-			"_peer._tcp",          // Service type (custom)
-			"local.",              // Service domain
-			port,                  // Port to expose
-			[]string{"txtvers=1"}, // Optional TXT records
-			intr,                  // Use default network interface
-		)
+		err = consulClient.RegisterService(deviceID, port)
 		if err != nil {
-			log.Fatalf("Failed to register mDNS service: %v", err)
+			log.Fatal("Failed to register service in Consul:", err)
 		}
-		defer zeroconfServer.Shutdown()
 
-		log.Printf("mDNS service '%s' registered on port %d", deviceID, port)
+		// Handle OS signals
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+		go func() {
+			<-sigChan
+			fmt.Println("\nShutting down gracefully...")
+			cancel()
+			consulClient.DeregisterService(deviceID)
+			os.Exit(0)
+		}()
 
 		// Start the sync server
 		server := server.NewSyncServer(deviceID, port, syncDir)
@@ -195,24 +156,3 @@ var startCmd = &cobra.Command{
 		}
 	},
 }
-
-// func getSystemInterfaces() ([]netinfo.InterfaceInfo, error) {
-// 	var validInterfaces []netinfo.InterfaceInfo
-
-// 	// Get all network interfaces
-// 	interfaces, err := netinfo.GetAllInterfaces()
-// 	if err != nil {
-// 		log.Fatalf("Error getting interfaces: %v", err)
-// 	}
-
-// 	for _, iface := range interfaces {
-// 		// Exclude WSL-related interfaces
-// 		fmt.Printf("iface: %s, is up: %v\n", iface.Name, iface.IsUp)
-// 		if strings.Contains(iface.Name, "WSL") || strings.Contains(iface.Name, "vEthernet") {
-// 			continue
-// 		}
-// 		validInterfaces = append(validInterfaces, iface)
-// 	}
-
-// 	return validInterfaces, nil
-// }
