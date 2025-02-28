@@ -3,13 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
-	"gorsync/internal/consul"
 	"gorsync/internal/device"
+	"gorsync/internal/discovery"
 	"gorsync/internal/server"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -126,15 +128,24 @@ var startCmd = &cobra.Command{
 		port := viper.GetInt("port")
 		syncDir := viper.GetString("sync_directory")
 
-		// Register service in Consul
-		consulClient, err := consul.NewClient()
-		if err != nil {
-			log.Fatal("Failed to initialize Consul client:", err)
+		// Create metadata with useful information
+		metadata := map[string]string{
+			"version": "1.0.0",
+			"os":      detectOS(),
 		}
 
-		err = consulClient.RegisterService(deviceID, port)
+		// Create the discovery service
+		disc := discovery.NewDiscovery(
+			deviceID,      // Unique ID for this instance
+			"file-syncer", // Service name (all your sync apps should use the same name)
+			9000,          // Port your sync service listens on
+			metadata,      // Additional metadata
+		)
+
+		// Start the discovery service
+		err = disc.Start()
 		if err != nil {
-			log.Fatal("Failed to register service in Consul:", err)
+			log.Fatalf("Failed to start discovery: %v", err)
 		}
 
 		// Handle OS signals
@@ -145,14 +156,45 @@ var startCmd = &cobra.Command{
 			<-sigChan
 			fmt.Println("\nShutting down gracefully...")
 			cancel()
-			consulClient.DeregisterService(deviceID)
+			disc.Stop()
 			os.Exit(0)
 		}()
 
 		// Start the sync server
-		server := server.NewSyncServer(deviceID, port, syncDir)
+		server := server.NewSyncServer(deviceID, port, syncDir, disc)
 		if err := server.Start(ctx); err != nil {
 			log.Fatal("Server error:", err)
 		}
 	},
+}
+
+// Get the real IP address of the container
+func getLocalIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, addr := range addrs {
+		if ipNet, ok := addr.(*net.IPNet); ok {
+			if !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
+				return ipNet.IP.String()
+			}
+		}
+	}
+	return "127.0.0.1" // Fallback to localhost if no external IP is found
+}
+
+// detectOS returns the current operating system
+func detectOS() string {
+	switch os := runtime.GOOS; os {
+	case "windows":
+		return "windows"
+	case "darwin":
+		return "macos"
+	case "linux":
+		return "linux"
+	default:
+		return os
+	}
 }

@@ -6,7 +6,7 @@ import (
 	"encoding/gob"
 	"encoding/hex"
 	"fmt"
-	"gorsync/internal/consul"
+	"gorsync/internal/discovery"
 	"io"
 	"log"
 	"net"
@@ -56,9 +56,10 @@ type SyncServer struct {
 	metadataLock sync.RWMutex
 	connLock     sync.RWMutex
 	watcher      *fsnotify.Watcher
+	discovery    *discovery.Discovery
 }
 
-func NewSyncServer(deviceID string, port int, syncDir string) *SyncServer {
+func NewSyncServer(deviceID string, port int, syncDir string, discovery *discovery.Discovery) *SyncServer {
 	return &SyncServer{
 		deviceID:    deviceID,
 		port:        port,
@@ -66,6 +67,7 @@ func NewSyncServer(deviceID string, port int, syncDir string) *SyncServer {
 		peers:       make(map[string]string),
 		metadata:    make(map[string]FileMetadata),
 		connections: make(map[string]*Connection),
+		discovery:   discovery,
 	}
 }
 
@@ -96,34 +98,284 @@ func (s *SyncServer) Start(ctx context.Context) error {
 
 	log.Printf("Server listening on port %d", s.port)
 
-	s.connectToPeers(ctx)
+	go s.connectToPeers(ctx)
 
-	// for {
-	// 	conn, err := listener.Accept()
-	// 	if err != nil {
-	// 		log.Printf("Failed to accept connection: %v", err)
-	// 		continue
-	// 	}
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Printf("Failed to accept connection: %v", err)
+			continue
+		}
 
-	// 	// TODO: Why in windows happends connection from 50xxx ports?
-	// 	// Extract the IP address from the remote address and local address
-	// 	remoteAddr, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
-	// 	localAddr, _, _ := net.SplitHostPort(conn.LocalAddr().String())
+		// TODO: Why in windows happends connection from 50xxx ports?
+		// Extract the IP address from the remote address and local address
+		remoteAddr, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+		localAddr, _, _ := net.SplitHostPort(conn.LocalAddr().String())
 
-	// 	// Check if the connection is from the same host by comparing IP addresses
-	// 	if remoteAddr == localAddr {
-	// 		// Skip connection from the same host
-	// 		log.Printf("Rejected connection from the same host: %s", conn.RemoteAddr().String())
-	// 		conn.Close()
-	// 		continue
-	// 	}
+		// Check if the connection is from the same host by comparing IP addresses
+		if remoteAddr == localAddr {
+			// Skip connection from the same host
+			log.Printf("Rejected connection from the same host: %s", conn.RemoteAddr().String())
+			conn.Close()
+			continue
+		}
 
-	// 	fmt.Printf("YEP I ACCEPT CONNECTION: %s\n", conn.RemoteAddr().String())
+		fmt.Printf("YEP I ACCEPT CONNECTION: %s\n", conn.RemoteAddr().String())
 
-	// 	go s.handleConnection(conn)
-	// }
+		go s.handleConnection(conn)
+	}
+}
 
-	return nil
+// func (s *SyncServer) connectToPeers(ctx context.Context) {
+// 	ticker := time.NewTicker(3 * time.Second)
+// 	defer ticker.Stop()
+
+// 	// Track connection attempts to avoid duplicate attempts
+// 	connectionAttempts := make(map[string]time.Time)
+// 	connectionTimeout := 30 * time.Second
+
+// 	for {
+// 		select {
+// 		case <-ctx.Done():
+// 			log.Println("Stopping peer discovery")
+// 			return
+// 		case <-ticker.C:
+// 			services := s.discovery.GetServicesByName("file-syncer")
+
+// 			// Create a set of current peers for detecting disconnections
+// 			activePeers := make(map[string]bool)
+
+// 			s.connLock.Lock()
+
+// 			// Process discovered peers
+// 			for _, service := range services {
+// 				peerID := service.ID
+
+// 				// Mark as active
+// 				activePeers[peerID] = true
+
+// 				// Ignore self-discovery
+// 				if peerID == s.deviceID {
+// 					continue
+// 				}
+
+// 				address := fmt.Sprintf("%s:%d", service.Address, service.Port)
+
+// 				// Check if it's a new peer or address has changed
+// 				currentAddr, exists := s.peers[peerID]
+// 				if !exists || currentAddr != address {
+// 					var peerStatus string
+// 					if exists {
+// 						peerStatus = "updated"
+// 					} else {
+// 						peerStatus = "new"
+// 					}
+// 					log.Printf("Discovered %s peer: %s at %s", peerStatus, peerID, address)
+// 					s.peers[peerID] = address
+
+// 					// Clear previous connection attempt if address changed
+// 					delete(connectionAttempts, peerID)
+// 				}
+// 			}
+
+// 			// Detect and remove peers that are no longer available
+// 			for peerID := range s.peers {
+// 				if peerID != s.deviceID && !activePeers[peerID] {
+// 					log.Printf("Peer %s is no longer available, removing", peerID)
+// 					delete(s.peers, peerID)
+// 					delete(connectionAttempts, peerID)
+// 					// Consider closing existing connections here if you track them
+// 				}
+// 			}
+
+// 			// Launch connection attempts with rate limiting
+// 			now := time.Now()
+// 			maxConcurrentAttempts := 3 // Limit concurrent connection attempts
+// 			activeAttempts := 0
+
+// 			for peerID, addr := range s.peers {
+// 				// Skip if we've recently attempted to connect
+// 				lastAttempt, hasAttempted := connectionAttempts[peerID]
+// 				if hasAttempted && now.Sub(lastAttempt) < connectionTimeout {
+// 					continue
+// 				}
+
+// 				// Limit concurrent connection attempts
+// 				if activeAttempts >= maxConcurrentAttempts {
+// 					break
+// 				}
+
+// 				// Record connection attempt time
+// 				connectionAttempts[peerID] = now
+// 				activeAttempts++
+
+// 				go func(id string, address string) {
+// 					success := s.establishConnection(id, address)
+
+// 					// Update the attempt time based on result
+// 					s.connLock.Lock()
+// 					if !success {
+// 						// If failed, set a shorter retry interval
+// 						connectionAttempts[id] = now.Add(-connectionTimeout + (5 * time.Second))
+// 					} else {
+// 						// If successful, no need to retry for a longer period
+// 						connectionAttempts[id] = now
+// 					}
+// 					s.connLock.Unlock()
+// 				}(peerID, addr)
+// 			}
+
+// 			s.connLock.Unlock()
+// 		}
+// 	}
+// }
+
+func (s *SyncServer) connectToPeers(ctx context.Context) {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Stopping peer discovery")
+			return
+		case <-ticker.C:
+			services := s.discovery.GetServicesByName("file-syncer")
+
+			s.connLock.Lock()
+
+			for _, service := range services {
+				peerID := service.ID
+
+				if peerID == s.deviceID {
+					continue
+				}
+
+				address := fmt.Sprintf("%s:%d", service.Address, service.Port)
+
+				// If peer is new, log and connect
+				if s.peers[peerID] != address {
+					log.Printf("Discovered peer: %s at %s", peerID, address)
+					s.peers[peerID] = address
+					go s.establishConnection(peerID, address)
+				}
+			}
+
+			s.connLock.Unlock()
+		}
+	}
+}
+
+// establishConnection checks for existing connections and attempts to connect to a peer.
+func (s *SyncServer) establishConnection(peerID, address string) bool {
+	// Check if connection already exists
+	s.connLock.RLock()
+	if _, exists := s.connections[peerID]; exists {
+		s.connLock.RUnlock()
+		return true // Connection already exists, considered successful
+	}
+	s.connLock.RUnlock()
+
+	// Attempt connection
+	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
+	if err != nil {
+		log.Printf("Failed to connect to peer %s (%s): %v", peerID, address, err)
+		return false
+	}
+
+	log.Printf("Connected to peer %s at %s", peerID, address)
+
+	go s.handleConnection(conn)
+
+	return true
+}
+
+func (s *SyncServer) handleConnection(conn net.Conn) {
+	defer conn.Close()
+
+	encoder := gob.NewEncoder(conn)
+	decoder := gob.NewDecoder(conn)
+
+	// Send handshake first
+	handshakeMsg := SyncMessage{
+		Type:     "handshake",
+		DeviceID: s.deviceID,
+	}
+	if err := encoder.Encode(handshakeMsg); err != nil {
+		log.Printf("Failed to send handshake: %v", err)
+		return
+	}
+
+	// Wait for peer's handshake response
+	var response SyncMessage
+	if err := decoder.Decode(&response); err != nil {
+		log.Printf("Failed to receive handshake response: %v", err)
+		return
+	}
+
+	if response.Type != "handshake" {
+		log.Printf("Expected handshake, got %s", response.Type)
+		return
+	}
+
+	peerID := response.DeviceID
+	log.Printf("Handshake successful with peer: %s", peerID)
+
+	// Store the connection
+	s.connLock.Lock()
+	s.connections[peerID] = &Connection{
+		conn:    conn,
+		encoder: encoder,
+		decoder: decoder,
+	}
+	s.connLock.Unlock()
+
+	// Send initial metadata
+	log.Println("Sending initial metadata to", peerID)
+	s.sendInitialMetadata(peerID)
+
+	// Handle incoming messages
+	for {
+		var msg SyncMessage
+		if err := decoder.Decode(&msg); err != nil {
+			if err.Error() != "EOF" {
+				log.Printf("Error decoding message from %s: %v", peerID, err)
+			}
+			break
+		}
+
+		switch msg.Type {
+		case "metadata":
+			s.handleMetadataUpdate(msg)
+		case "file_request":
+			s.handleFileRequest(msg)
+		case "file_data":
+			s.handleFileData(msg)
+		default:
+			log.Printf("Unknown message type from %s: %s", peerID, msg.Type)
+		}
+	}
+
+	// Remove connection when the loop exits
+	s.connLock.Lock()
+	delete(s.connections, peerID)
+	s.connLock.Unlock()
+	log.Printf("Connection closed with peer: %s", peerID)
+}
+
+func (s *SyncServer) handleMetadataUpdate(msg SyncMessage) {
+	s.metadataLock.Lock()
+	defer s.metadataLock.Unlock()
+
+	localMeta, exists := s.metadata[msg.Metadata.Path]
+	if !exists || localMeta.ModTime.Before(msg.Metadata.ModTime) {
+		if msg.Metadata.IsDeleted {
+			delete(s.metadata, msg.Metadata.Path)
+			os.Remove(filepath.Join(s.syncDir, msg.Metadata.Path))
+		} else {
+			s.requestFile(msg.DeviceID, msg.Metadata)
+		}
+	}
 }
 
 // Add directories recursively to the watcher, respecting ignore patterns
@@ -295,39 +547,13 @@ func (s *SyncServer) initializeMetadata() error {
 	// Get ignore patterns from config
 	ignorePatterns := viper.GetStringSlice("ignore_patterns")
 
-	// Create a file matcher function
-	shouldIgnore := func(path string) bool {
-		// Get base name for matching against patterns
-		base := filepath.Base(path)
-
-		// Check if the path matches any ignore pattern
-		for _, pattern := range ignorePatterns {
-			matched, err := filepath.Match(pattern, base)
-			if err != nil {
-				log.Printf("Invalid pattern %s: %v", pattern, err)
-				continue
-			}
-
-			if matched {
-				return true
-			}
-
-			// Also check for directory matches (for directories like node_modules)
-			if strings.Contains(path, string(filepath.Separator)+pattern+string(filepath.Separator)) ||
-				strings.HasSuffix(path, string(filepath.Separator)+pattern) {
-				return true
-			}
-		}
-		return false
-	}
-
 	return filepath.Walk(s.syncDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
 		// Skip the path if it should be ignored
-		if shouldIgnore(path) {
+		if shouldIgnoreFile(path, ignorePatterns) {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
@@ -361,232 +587,6 @@ func (s *SyncServer) initializeMetadata() error {
 	})
 }
 
-func (s *SyncServer) connectToPeers(ctx context.Context) {
-	consulClient, err := consul.NewClient()
-	if err != nil {
-		log.Fatalf("Failed to initialize Consul client: %v", err)
-	}
-
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
-
-	// Track connection attempts to avoid duplicate attempts
-	connectionAttempts := make(map[string]time.Time)
-	connectionTimeout := 30 * time.Second
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Println("Stopping peer discovery")
-			return
-		case <-ticker.C:
-			entries, err := consulClient.DiscoverPeers("gorsync")
-			if err != nil {
-				log.Printf("Failed to discover peers: %v", err)
-				continue
-			}
-
-			// Create a set of current peers for detecting disconnections
-			activePeers := make(map[string]bool)
-
-			s.connLock.Lock()
-
-			// Process discovered peers
-			for _, entry := range entries {
-				peerID := entry.ID
-
-				// Mark as active
-				activePeers[peerID] = true
-
-				// Ignore self-discovery
-				if peerID == s.deviceID {
-					continue
-				}
-
-				address := fmt.Sprintf("%s:%d", entry.Address, entry.Port)
-
-				// Check if it's a new peer or address has changed
-				currentAddr, exists := s.peers[peerID]
-				if !exists || currentAddr != address {
-					var peerStatus string
-					if exists {
-						peerStatus = "updated"
-					} else {
-						peerStatus = "new"
-					}
-					log.Printf("Discovered %s peer: %s at %s", peerStatus, peerID, address)
-					s.peers[peerID] = address
-
-					// Clear previous connection attempt if address changed
-					delete(connectionAttempts, peerID)
-				}
-			}
-
-			// Detect and remove peers that are no longer available
-			for peerID := range s.peers {
-				if peerID != s.deviceID && !activePeers[peerID] {
-					log.Printf("Peer %s is no longer available, removing", peerID)
-					delete(s.peers, peerID)
-					delete(connectionAttempts, peerID)
-					// Consider closing existing connections here if you track them
-				}
-			}
-
-			// Launch connection attempts with rate limiting
-			now := time.Now()
-			maxConcurrentAttempts := 3 // Limit concurrent connection attempts
-			activeAttempts := 0
-
-			for peerID, addr := range s.peers {
-				// Skip if we've recently attempted to connect
-				lastAttempt, hasAttempted := connectionAttempts[peerID]
-				if hasAttempted && now.Sub(lastAttempt) < connectionTimeout {
-					continue
-				}
-
-				// Limit concurrent connection attempts
-				if activeAttempts >= maxConcurrentAttempts {
-					break
-				}
-
-				// Record connection attempt time
-				connectionAttempts[peerID] = now
-				activeAttempts++
-
-				go func(id string, address string) {
-					success := s.establishConnection(id, address)
-
-					// Update the attempt time based on result
-					s.connLock.Lock()
-					if !success {
-						// If failed, set a shorter retry interval
-						connectionAttempts[id] = now.Add(-connectionTimeout + (5 * time.Second))
-					} else {
-						// If successful, no need to retry for a longer period
-						connectionAttempts[id] = now
-					}
-					s.connLock.Unlock()
-				}(peerID, addr)
-			}
-
-			s.connLock.Unlock()
-		}
-	}
-}
-
-// establishConnection checks for existing connections and attempts to connect to a peer.
-func (s *SyncServer) establishConnection(peerID, address string) bool {
-	// Check if connection already exists
-	s.connLock.RLock()
-	if _, exists := s.connections[peerID]; exists {
-		s.connLock.RUnlock()
-		return true // Connection already exists, considered successful
-	}
-	s.connLock.RUnlock()
-
-	// Attempt connection
-	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
-	if err != nil {
-		log.Printf("Failed to connect to peer %s (%s): %v", peerID, address, err)
-		return false
-	}
-
-	log.Printf("Connected to peer %s at %s", peerID, address)
-
-	// Store the connection in the connections map
-	s.connLock.Lock()
-	decoder := gob.NewDecoder(conn)
-	encoder := gob.NewEncoder(conn)
-	s.connections[peerID] = &Connection{
-		conn:    conn,
-		encoder: encoder,
-		decoder: decoder,
-	}
-	s.connLock.Unlock()
-
-	// Handle the connection (likely in a goroutine)
-	go s.handleConnection(peerID, conn)
-
-	return true
-}
-
-func (s *SyncServer) handleConnection(peerID string, conn net.Conn) {
-	defer conn.Close()
-
-	// Send initial handshake
-	handshake := SyncMessage{
-		Type:     "handshake",
-		DeviceID: s.deviceID,
-	}
-	log.Println("Sending handshake")
-	if err := s.connections[peerID].encoder.Encode(handshake); err != nil {
-		log.Printf("Handshake failed: %v", err)
-		return
-	}
-
-	// Wait for handshake response to get peer's device ID
-	var handshakeResponse SyncMessage
-	log.Println("Waiting for handshake response")
-	if err := s.connections[peerID].decoder.Decode(&handshakeResponse); err != nil {
-		log.Printf("Handshake response failed: %v", err)
-		return
-	}
-
-	if handshakeResponse.Type != "handshake" {
-		log.Printf("Expected handshake, got %s", handshakeResponse.Type)
-		return
-	}
-
-	log.Printf("Handshake successful with peer: %s", peerID)
-
-	// Send initial metadata after successful handshake
-	log.Println("Sending initial metadata")
-	s.sendInitialMetadata(peerID)
-
-	// Handle incoming messages
-	for {
-		var msg SyncMessage
-		if err := s.connections[peerID].decoder.Decode(&msg); err != nil {
-			if err.Error() != "EOF" {
-				log.Printf("Error decoding message from %s: %v", peerID, err)
-			}
-			break
-		}
-
-		switch msg.Type {
-		case "metadata":
-			s.handleMetadataUpdate(msg)
-		case "file_request":
-			s.handleFileRequest(msg)
-		case "file_data":
-			s.handleFileData(msg)
-		default:
-			log.Printf("Unknown message type from %s: %s", peerID, msg.Type)
-		}
-	}
-
-	// Remove connection when the loop exits
-	s.connLock.Lock()
-	delete(s.connections, peerID)
-	s.connLock.Unlock()
-	log.Printf("Connection closed with peer: %s", peerID)
-}
-
-func (s *SyncServer) handleMetadataUpdate(msg SyncMessage) {
-	s.metadataLock.Lock()
-	defer s.metadataLock.Unlock()
-
-	localMeta, exists := s.metadata[msg.Metadata.Path]
-	if !exists || localMeta.ModTime.Before(msg.Metadata.ModTime) {
-		if msg.Metadata.IsDeleted {
-			delete(s.metadata, msg.Metadata.Path)
-			os.Remove(filepath.Join(s.syncDir, msg.Metadata.Path))
-		} else {
-			s.requestFile(msg.DeviceID, msg.Metadata)
-		}
-	}
-}
-
 func (s *SyncServer) handleFileRequest(msg SyncMessage) {
 	s.connLock.RLock()
 	connection, exists := s.connections[msg.DeviceID]
@@ -604,14 +604,14 @@ func (s *SyncServer) handleFileRequest(msg SyncMessage) {
 		return
 	}
 
-	resposne := SyncMessage{
+	response := SyncMessage{
 		Type:     "file_data",
 		DeviceID: s.deviceID,
 		Metadata: msg.Metadata,
 		Data:     data,
 	}
 
-	if err := connection.encoder.Encode(resposne); err != nil {
+	if err := connection.encoder.Encode(response); err != nil {
 		log.Printf("Failed to send file data: %v", err)
 	}
 }
@@ -624,11 +624,11 @@ func (s *SyncServer) handleFileData(msg SyncMessage) {
 		return
 	}
 
-	// match, err := s.verifyChecksum(path, msg.Metadata.CheckSum)
-	// if err == nil && match {
-	// 	// File already exists and matches checksum, no need to write
-	// 	return
-	// }
+	match, err := s.verifyChecksum(path, msg.Metadata.CheckSum)
+	if err == nil && match {
+		// File already exists and matches checksum, no need to write
+		return
+	}
 
 	// sanitizedPath := sanitizeFilename(path)
 	if err := os.WriteFile(path, msg.Data, 0644); err != nil {
@@ -655,15 +655,6 @@ func (s *SyncServer) handleFileData(msg SyncMessage) {
 	}
 }
 
-func sanitizeFilename(filename string) string {
-	invalidChars := []string{"?", ":", "*", "<", ">", "|", "\"", "\\", ";"}
-	for _, char := range invalidChars {
-		filename = strings.ReplaceAll(filename, char, "_") // Replace invalid characters with underscores
-	}
-	filename = strings.ReplaceAll(filename, " ", "_") // Replace spaces with underscores
-	return filename
-}
-
 func (s *SyncServer) requestFile(deviceID string, metadata FileMetadata) {
 	s.connLock.RLock()
 	connection, exists := s.connections[deviceID]
@@ -683,6 +674,15 @@ func (s *SyncServer) requestFile(deviceID string, metadata FileMetadata) {
 	if err := connection.encoder.Encode(request); err != nil {
 		log.Printf("Failed to  send file request: %v", err)
 	}
+}
+
+func sanitizeFilename(filename string) string {
+	invalidChars := []string{"?", ":", "*", "<", ">", "|", "\"", "\\", ";"}
+	for _, char := range invalidChars {
+		filename = strings.ReplaceAll(filename, char, "_") // Replace invalid characters with underscores
+	}
+	filename = strings.ReplaceAll(filename, " ", "_") // Replace spaces with underscores
+	return filename
 }
 
 func (s *SyncServer) sendInitialMetadata(peerID string) {
@@ -708,7 +708,6 @@ func (s *SyncServer) sendInitialMetadata(peerID string) {
 			log.Printf("Failed to send initial metadata: %v", err)
 			return
 		}
-		// log.Println("Sent initial metadata")
 	}
 }
 
@@ -721,8 +720,6 @@ func (s *SyncServer) broadcastMetadata(metadata FileMetadata) {
 
 	s.connLock.RLock()
 	defer s.connLock.RUnlock()
-
-	// fmt.Println("s.connections", s.connections)
 
 	for _, connection := range s.connections {
 		if err := connection.encoder.Encode(msg); err != nil {
