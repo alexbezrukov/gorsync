@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"gorsync/internal/discovery"
+	"gorsync/internal/model"
 	"io"
 	"log"
 	"net"
@@ -21,8 +22,22 @@ import (
 )
 
 func init() {
-	gob.Register(FileMetadata{})
-	gob.Register(SyncMessage{})
+	gob.Register(model.FileMetadata{})
+	gob.Register(model.SyncMessage{})
+}
+
+type SyncServer struct {
+	deviceID     string
+	port         int
+	syncDir      string
+	peers        map[string]string
+	metadata     map[string]model.FileMetadata
+	connections  map[string]*Connection
+	metadataLock sync.RWMutex
+	connLock     sync.RWMutex
+	watcher      *fsnotify.Watcher
+	discovery    *discovery.Discovery
+	listener     net.Listener
 }
 
 type Connection struct {
@@ -31,41 +46,13 @@ type Connection struct {
 	decoder *gob.Decoder
 }
 
-type FileMetadata struct {
-	Path      string    `json:"path"`
-	Size      int64     `json:"size"`
-	ModTime   time.Time `json:"mod_time"`
-	CheckSum  string    `json:"checksum"`
-	IsDeleted bool      `json:"is_deleted"`
-}
-
-type SyncMessage struct {
-	Type     string       `json:"type"`
-	DeviceID string       `json:"device_id"`
-	Metadata FileMetadata `json:"metadata"`
-	Data     []byte       `json:"data,omitempty"`
-}
-
-type SyncServer struct {
-	deviceID     string
-	port         int
-	syncDir      string
-	peers        map[string]string
-	metadata     map[string]FileMetadata
-	connections  map[string]*Connection
-	metadataLock sync.RWMutex
-	connLock     sync.RWMutex
-	watcher      *fsnotify.Watcher
-	discovery    *discovery.Discovery
-}
-
 func NewSyncServer(deviceID string, port int, syncDir string, discovery *discovery.Discovery) *SyncServer {
 	return &SyncServer{
 		deviceID:    deviceID,
 		port:        port,
 		syncDir:     syncDir,
 		peers:       make(map[string]string),
-		metadata:    make(map[string]FileMetadata),
+		metadata:    make(map[string]model.FileMetadata),
 		connections: make(map[string]*Connection),
 		discovery:   discovery,
 	}
@@ -90,40 +77,61 @@ func (s *SyncServer) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize metadata: %w", err)
 	}
 
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", s.port))
+	s.listener, err = net.Listen("tcp", fmt.Sprintf(":%d", s.port))
 	if err != nil {
 		return fmt.Errorf("failed to start TCP server: %w", err)
 	}
-	defer listener.Close()
+	defer s.listener.Close()
 
-	log.Printf("Server listening on port %d", s.port)
+	log.Printf("Sync server listening on port %d", s.port)
 
 	go s.connectToPeers(ctx)
 
 	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			log.Printf("Failed to accept connection: %v", err)
-			continue
+		select {
+		case <-ctx.Done():
+			log.Println("Shutting down sync server...")
+			return nil
+		default:
+			conn, err := s.listener.Accept()
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil // Graceful shutdown
+				}
+				log.Printf("Failed to accept connection: %v", err)
+				continue
+			}
+
+			// TODO: Why in windows happends connection from 50xxx ports?
+			// Extract the IP address from the remote address and local address
+			remoteAddr, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+			localAddr, _, _ := net.SplitHostPort(conn.LocalAddr().String())
+
+			// Check if the connection is from the same host by comparing IP addresses
+			if remoteAddr == localAddr {
+				// Skip connection from the same host
+				log.Printf("Rejected connection from the same host: %s", conn.RemoteAddr().String())
+				conn.Close()
+				continue
+			}
+
+			fmt.Printf("YEP I ACCEPT CONNECTION: %s\n", conn.RemoteAddr().String())
+
+			go s.handleConnection(conn)
 		}
-
-		// TODO: Why in windows happends connection from 50xxx ports?
-		// Extract the IP address from the remote address and local address
-		remoteAddr, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
-		localAddr, _, _ := net.SplitHostPort(conn.LocalAddr().String())
-
-		// Check if the connection is from the same host by comparing IP addresses
-		if remoteAddr == localAddr {
-			// Skip connection from the same host
-			log.Printf("Rejected connection from the same host: %s", conn.RemoteAddr().String())
-			conn.Close()
-			continue
-		}
-
-		fmt.Printf("YEP I ACCEPT CONNECTION: %s\n", conn.RemoteAddr().String())
-
-		go s.handleConnection(conn)
 	}
+}
+
+func (s *SyncServer) Stop() {
+	if s.watcher != nil {
+		s.watcher.Close()
+	}
+
+	if s.listener != nil {
+		s.listener.Close()
+	}
+
+	log.Println("Sync server stopped")
 }
 
 // func (s *SyncServer) connectToPeers(ctx context.Context) {
@@ -240,18 +248,18 @@ func (s *SyncServer) connectToPeers(ctx context.Context) {
 			log.Println("Stopping peer discovery")
 			return
 		case <-ticker.C:
-			services := s.discovery.GetServicesByName("file-syncer")
+			devices := s.discovery.GetDevicesByName("file-syncer")
 
 			s.connLock.Lock()
 
-			for _, service := range services {
-				peerID := service.ID
+			for _, device := range devices {
+				peerID := device.ID
 
 				if peerID == s.deviceID {
 					continue
 				}
 
-				address := fmt.Sprintf("%s:%d", service.Address, service.Port)
+				address := fmt.Sprintf("%s:%d", device.Address, device.Port)
 
 				// If peer is new, log and connect
 				if s.peers[peerID] != address {
@@ -297,7 +305,7 @@ func (s *SyncServer) handleConnection(conn net.Conn) {
 	decoder := gob.NewDecoder(conn)
 
 	// Send handshake first
-	handshakeMsg := SyncMessage{
+	handshakeMsg := model.SyncMessage{
 		Type:     "handshake",
 		DeviceID: s.deviceID,
 	}
@@ -307,7 +315,7 @@ func (s *SyncServer) handleConnection(conn net.Conn) {
 	}
 
 	// Wait for peer's handshake response
-	var response SyncMessage
+	var response model.SyncMessage
 	if err := decoder.Decode(&response); err != nil {
 		log.Printf("Failed to receive handshake response: %v", err)
 		return
@@ -336,7 +344,7 @@ func (s *SyncServer) handleConnection(conn net.Conn) {
 
 	// Handle incoming messages
 	for {
-		var msg SyncMessage
+		var msg model.SyncMessage
 		if err := decoder.Decode(&msg); err != nil {
 			if err.Error() != "EOF" {
 				log.Printf("Error decoding message from %s: %v", peerID, err)
@@ -363,7 +371,7 @@ func (s *SyncServer) handleConnection(conn net.Conn) {
 	log.Printf("Connection closed with peer: %s", peerID)
 }
 
-func (s *SyncServer) handleMetadataUpdate(msg SyncMessage) {
+func (s *SyncServer) handleMetadataUpdate(msg model.SyncMessage) {
 	s.metadataLock.Lock()
 	defer s.metadataLock.Unlock()
 
@@ -522,7 +530,7 @@ func (s *SyncServer) updateFileMetadata(relPath string, isDeleted bool) {
 			return
 		}
 
-		metadata := FileMetadata{
+		metadata := model.FileMetadata{
 			Path:      relPath,
 			Size:      info.Size(),
 			ModTime:   info.ModTime(),
@@ -575,7 +583,7 @@ func (s *SyncServer) initializeMetadata() error {
 			}
 
 			s.metadataLock.Lock()
-			s.metadata[relPath] = FileMetadata{
+			s.metadata[relPath] = model.FileMetadata{
 				Path:     relPath,
 				Size:     info.Size(),
 				ModTime:  info.ModTime(),
@@ -587,7 +595,7 @@ func (s *SyncServer) initializeMetadata() error {
 	})
 }
 
-func (s *SyncServer) handleFileRequest(msg SyncMessage) {
+func (s *SyncServer) handleFileRequest(msg model.SyncMessage) {
 	s.connLock.RLock()
 	connection, exists := s.connections[msg.DeviceID]
 	s.connLock.RUnlock()
@@ -604,7 +612,7 @@ func (s *SyncServer) handleFileRequest(msg SyncMessage) {
 		return
 	}
 
-	response := SyncMessage{
+	response := model.SyncMessage{
 		Type:     "file_data",
 		DeviceID: s.deviceID,
 		Metadata: msg.Metadata,
@@ -616,7 +624,7 @@ func (s *SyncServer) handleFileRequest(msg SyncMessage) {
 	}
 }
 
-func (s *SyncServer) handleFileData(msg SyncMessage) {
+func (s *SyncServer) handleFileData(msg model.SyncMessage) {
 	path := filepath.Join(s.syncDir, msg.Metadata.Path)
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -655,7 +663,7 @@ func (s *SyncServer) handleFileData(msg SyncMessage) {
 	}
 }
 
-func (s *SyncServer) requestFile(deviceID string, metadata FileMetadata) {
+func (s *SyncServer) requestFile(deviceID string, metadata model.FileMetadata) {
 	s.connLock.RLock()
 	connection, exists := s.connections[deviceID]
 	s.connLock.RUnlock()
@@ -665,7 +673,7 @@ func (s *SyncServer) requestFile(deviceID string, metadata FileMetadata) {
 		return
 	}
 
-	request := SyncMessage{
+	request := model.SyncMessage{
 		Type:     "file_request",
 		DeviceID: s.deviceID,
 		Metadata: metadata,
@@ -699,7 +707,7 @@ func (s *SyncServer) sendInitialMetadata(peerID string) {
 	defer s.metadataLock.RUnlock()
 
 	for _, metadata := range s.metadata {
-		msg := SyncMessage{
+		msg := model.SyncMessage{
 			Type:     "metadata",
 			DeviceID: s.deviceID,
 			Metadata: metadata,
@@ -711,8 +719,8 @@ func (s *SyncServer) sendInitialMetadata(peerID string) {
 	}
 }
 
-func (s *SyncServer) broadcastMetadata(metadata FileMetadata) {
-	msg := SyncMessage{
+func (s *SyncServer) broadcastMetadata(metadata model.FileMetadata) {
+	msg := model.SyncMessage{
 		Type:     "metadata",
 		DeviceID: s.deviceID,
 		Metadata: metadata,

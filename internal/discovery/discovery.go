@@ -4,20 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"gorsync/internal/memstore"
+	"gorsync/internal/model"
 	"net"
 	"sync"
 	"time"
 )
-
-// ServiceInfo contains information about a service instance
-type ServiceInfo struct {
-	ID         string            `json:"id"`
-	Name       string            `json:"name"`
-	Address    string            `json:"address"`
-	Port       int               `json:"port"`
-	Metadata   map[string]string `json:"metadata,omitempty"`
-	LastSeenAt time.Time         `json:"lastSeenAt"`
-}
 
 // Discovery handles service discovery in local network
 type Discovery struct {
@@ -27,16 +19,21 @@ type Discovery struct {
 	metadata      map[string]string
 	broadcastAddr string
 	broadcastPort int
-	services      map[string]ServiceInfo
+	devices       map[string]*model.Device
 	listener      *net.UDPConn
 	broadcaster   *net.UDPConn
 	mutex         sync.RWMutex
 	ctx           context.Context
 	cancel        context.CancelFunc
+	memstore      *memstore.MemStore
 }
 
 // NewDiscovery creates a new service discovery instance
-func NewDiscovery(serviceID, serviceName string, port int, metadata map[string]string) *Discovery {
+func NewDiscovery(
+	serviceID, serviceName string,
+	port int,
+	metadata map[string]string,
+	memstore *memstore.MemStore) *Discovery {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Discovery{
 		serviceID:     serviceID,
@@ -45,9 +42,10 @@ func NewDiscovery(serviceID, serviceName string, port int, metadata map[string]s
 		metadata:      metadata,
 		broadcastAddr: "255.255.255.255",
 		broadcastPort: 9876, // Choose a port unlikely to be in use
-		services:      make(map[string]ServiceInfo),
+		devices:       make(map[string]*model.Device),
 		ctx:           ctx,
 		cancel:        cancel,
+		memstore:      memstore,
 	}
 }
 
@@ -84,7 +82,7 @@ func (d *Discovery) Start() error {
 	go d.broadcastPresence()
 
 	// Start cleanup routine for stale services
-	go d.cleanupStaleServices()
+	go d.cleanupStaleDevices()
 
 	return nil
 }
@@ -100,30 +98,49 @@ func (d *Discovery) Stop() {
 	}
 }
 
-// GetServices returns all discovered services
-func (d *Discovery) GetServices() []ServiceInfo {
+// GetDevices returns all discovered devices
+func (d *Discovery) GetDevices() []*model.Device {
 	d.mutex.RLock()
 	defer d.mutex.RUnlock()
 
-	services := make([]ServiceInfo, 0, len(d.services))
-	for _, service := range d.services {
-		services = append(services, service)
+	devcies := make([]*model.Device, 0, len(d.devices))
+	for _, devcie := range d.devices {
+		devcies = append(devcies, devcie)
 	}
-	return services
+	return devcies
 }
 
-// GetServicesByName returns services filtered by name
-func (d *Discovery) GetServicesByName(name string) []ServiceInfo {
+func (d *Discovery) GetDevice(deviceID string) *model.Device {
 	d.mutex.RLock()
 	defer d.mutex.RUnlock()
 
-	services := make([]ServiceInfo, 0)
-	for _, service := range d.services {
-		if service.Name == name {
-			services = append(services, service)
+	for _, device := range d.devices {
+		if device.ID == deviceID {
+			return device
 		}
 	}
-	return services
+	return nil
+}
+
+func (d *Discovery) ChangeDeviceInfo(s *model.Device) {
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+
+	d.devices[s.ID] = s
+}
+
+// GetDevicesByName returns devices filtered by name
+func (d *Discovery) GetDevicesByName(name string) []*model.Device {
+	d.mutex.RLock()
+	defer d.mutex.RUnlock()
+
+	devcies := make([]*model.Device, 0)
+	for _, device := range d.devices {
+		if device.Name == name {
+			devcies = append(devcies, device)
+		}
+	}
+	return devcies
 }
 
 func (d *Discovery) broadcastPresence() {
@@ -137,7 +154,7 @@ func (d *Discovery) broadcastPresence() {
 		localIP = net.IPv4zero
 	}
 
-	announcement := ServiceInfo{
+	announcement := model.Device{
 		ID:       d.serviceID,
 		Name:     d.serviceName,
 		Address:  localIP.String(),
@@ -184,34 +201,42 @@ func (d *Discovery) receiveAnnouncements() {
 				continue
 			}
 
-			var service ServiceInfo
-			err = json.Unmarshal(buffer[:n], &service)
+			var device model.Device
+			err = json.Unmarshal(buffer[:n], &device)
 			if err != nil {
 				fmt.Printf("Error unmarshaling announcement: %v\n", err)
 				continue
 			}
 
 			// Filter out our own announcements
-			if service.ID == d.serviceID {
-				continue
+			if device.ID == d.serviceID {
+				device.Local = true
 			}
 
 			// If source address doesn't match the announced address, update it
 			// This helps with NAT and containers
-			if net.ParseIP(service.Address).IsUnspecified() {
-				service.Address = addr.IP.String()
+			if net.ParseIP(device.Address).IsUnspecified() {
+				device.Address = addr.IP.String()
 			}
 
-			service.LastSeenAt = time.Now()
+			device.LastSeenAt = time.Now()
 
 			d.mutex.Lock()
-			d.services[service.ID] = service
+			existingDevice, exists := d.devices[device.ID]
+			if exists {
+				existingDevice.Address = device.Address
+				existingDevice.LastSeenAt = time.Now()
+				existingDevice.Local = device.Local
+			} else {
+				d.devices[device.ID] = &device
+			}
+			d.memstore.SaveDevice(d.devices[device.ID])
 			d.mutex.Unlock()
 		}
 	}
 }
 
-func (d *Discovery) cleanupStaleServices() {
+func (d *Discovery) cleanupStaleDevices() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -221,10 +246,10 @@ func (d *Discovery) cleanupStaleServices() {
 			return
 		case <-ticker.C:
 			d.mutex.Lock()
-			for id, service := range d.services {
+			for id, device := range d.devices {
 				// Remove services not seen for 60 seconds
-				if time.Since(service.LastSeenAt) > 60*time.Second {
-					delete(d.services, id)
+				if time.Since(device.LastSeenAt) > 60*time.Second {
+					delete(d.devices, id)
 				}
 			}
 			d.mutex.Unlock()

@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"gorsync/internal/api"
 	"gorsync/internal/device"
 	"gorsync/internal/discovery"
+	"gorsync/internal/memstore"
 	"gorsync/internal/server"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -134,55 +135,46 @@ var startCmd = &cobra.Command{
 			"os":      detectOS(),
 		}
 
+		memstore := memstore.NewMemStore()
+
 		// Create the discovery service
-		disc := discovery.NewDiscovery(
+		discovery := discovery.NewDiscovery(
 			deviceID,      // Unique ID for this instance
 			"file-syncer", // Service name (all your sync apps should use the same name)
 			9000,          // Port your sync service listens on
 			metadata,      // Additional metadata
+			memstore,
 		)
 
 		// Start the discovery service
-		err = disc.Start()
+		err = discovery.Start()
 		if err != nil {
 			log.Fatalf("Failed to start discovery: %v", err)
 		}
 
-		// Handle OS signals
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
+		syncServer := server.NewSyncServer(deviceID, port, syncDir, discovery)
+		// go func() {
+		// 	if err := syncServer.Start(ctx); err != nil {
+		// 		log.Fatal("Server error:", err)
+		// 	}
+		// }()
+
+		apiServer := api.NewAPIServer(syncServer, memstore)
 		go func() {
-			<-sigChan
-			fmt.Println("\nShutting down gracefully...")
-			cancel()
-			disc.Stop()
-			os.Exit(0)
+			apiServer.Start()
 		}()
 
-		// Start the sync server
-		server := server.NewSyncServer(deviceID, port, syncDir, disc)
-		if err := server.Start(ctx); err != nil {
-			log.Fatal("Server error:", err)
-		}
+		<-sigChan
+		fmt.Println("\nShutting down gracefully...")
+		cancel()
+		discovery.Stop()
+		apiServer.Stop(ctx)
+		// syncServer.Stop()
+		os.Exit(0)
 	},
-}
-
-// Get the real IP address of the container
-func getLocalIP() string {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	for _, addr := range addrs {
-		if ipNet, ok := addr.(*net.IPNet); ok {
-			if !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
-				return ipNet.IP.String()
-			}
-		}
-	}
-	return "127.0.0.1" // Fallback to localhost if no external IP is found
 }
 
 // detectOS returns the current operating system
