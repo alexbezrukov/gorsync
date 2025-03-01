@@ -82,7 +82,7 @@ func NewAPIServer(
 	r.HandleFunc("/api/filesystem/directory", getFilesystemInfo).Methods("GET")
 
 	httpServer := &http.Server{
-		Addr:         ":9001",
+		Addr:         "0.0.0.0:9001",
 		Handler:      r,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
