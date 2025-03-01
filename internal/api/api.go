@@ -234,7 +234,7 @@ func (s *APIServer) syncDeviceHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Forward the request to the remote device
-		url := fmt.Sprintf("http://%s:%d/api/devices/%s/%s", device.Address, device.Port, deviceID, action)
+		url := fmt.Sprintf("http://%s:%d/api/devices/%s/%s", device.Address, 9001, deviceID, action)
 
 		req, err := http.NewRequest("POST", url, nil)
 		if err != nil {
