@@ -7,6 +7,7 @@ import (
 	"gorsync/internal/memstore"
 	"gorsync/internal/model"
 	"gorsync/internal/server"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -205,31 +206,52 @@ func (s *APIServer) syncDeviceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update syncing status
-	if action == "start-sync" {
-		if s.cancel != nil {
-			s.cancel() // Cancel any existing sync process before starting a new one
-		}
-
-		s.ctx, s.cancel = context.WithCancel(context.Background())
-		device.Syncing = true
-
-		go func() {
-			err := s.sync.Start(s.ctx)
-			if err != nil {
-				log.Fatal("Sync server error:", err)
+	if device.Local {
+		// Update syncing status
+		if action == "start-sync" {
+			if s.cancel != nil {
+				s.cancel() // Cancel any existing sync process before starting a new one
 			}
-			// s.memstore.SaveSyncServer(deviceID, model.SyncServer{IsRunning: true})
-		}()
-	} else if action == "stop-sync" {
-		if s.cancel != nil {
-			s.cancel() // Cancel the running sync process
+
+			s.ctx, s.cancel = context.WithCancel(context.Background())
+			device.Syncing = true
+
+			go func() {
+				err := s.sync.Start(s.ctx)
+				if err != nil {
+					log.Fatal("Sync server error:", err)
+				}
+			}()
+		} else if action == "stop-sync" {
+			if s.cancel != nil {
+				s.cancel() // Cancel the running sync process
+			}
+			device.Syncing = false
+			s.sync.Stop()
+		} else {
+			http.Error(w, "Invalid action", http.StatusBadRequest)
+			return
 		}
-		device.Syncing = false
-		// s.memstore.SaveSyncServer(deviceID, model.SyncServer{IsRunning: false})
-		s.sync.Stop()
 	} else {
-		http.Error(w, "Invalid action", http.StatusBadRequest)
+		// Forward the request to the remote device
+		url := fmt.Sprintf("http://%s:%d/api/devices/%s/%s", device.Address, device.Port, deviceID, action)
+
+		req, err := http.NewRequest("POST", url, nil)
+		if err != nil {
+			http.Error(w, "Failed to create request", http.StatusInternalServerError)
+			return
+		}
+
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to forward request: %v", err), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body) // Copy response body from remote device to the client
 		return
 	}
 
