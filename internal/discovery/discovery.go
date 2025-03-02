@@ -227,6 +227,7 @@ func (d *Discovery) receiveAnnouncements() {
 				existingDevice.Address = device.Address
 				existingDevice.LastSeenAt = time.Now()
 				existingDevice.Local = device.Local
+				existingDevice.Syncing = true
 			} else {
 				d.devices[device.ID] = &device
 			}

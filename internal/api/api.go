@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -198,16 +199,16 @@ func (s *APIServer) syncDeviceHandler(w http.ResponseWriter, r *http.Request) {
 	deviceID := vars["deviceId"]
 	action := vars["action"] // "start-sync" or "stop-sync"
 
-	fmt.Println("action", action)
+	log.Printf("Received sync request for device: %s, action: %s", deviceID, action)
 
 	device, exists := s.memstore.GetDevice(deviceID)
 	if !exists {
-		w.WriteHeader(http.StatusNotFound)
+		http.Error(w, "Device not found", http.StatusNotFound)
 		return
 	}
 
 	if device.Local {
-		// Update syncing status
+		// Local device: Start or Stop sync
 		if action == "start-sync" {
 			if s.cancel != nil {
 				s.cancel() // Cancel any existing sync process before starting a new one
@@ -215,11 +216,11 @@ func (s *APIServer) syncDeviceHandler(w http.ResponseWriter, r *http.Request) {
 
 			s.ctx, s.cancel = context.WithCancel(context.Background())
 			device.Syncing = true
+			log.Printf("Starting sync for local device: %s", deviceID)
 
 			go func() {
-				err := s.sync.Start(s.ctx)
-				if err != nil {
-					log.Fatal("Sync server error:", err)
+				if err := s.sync.Start(s.ctx); err != nil {
+					log.Println("Sync server error:", err)
 				}
 			}()
 		} else if action == "stop-sync" {
@@ -227,38 +228,64 @@ func (s *APIServer) syncDeviceHandler(w http.ResponseWriter, r *http.Request) {
 				s.cancel() // Cancel the running sync process
 			}
 			device.Syncing = false
+			log.Printf("Stopping sync for local device: %s", deviceID)
 			s.sync.Stop()
 		} else {
 			http.Error(w, "Invalid action", http.StatusBadRequest)
 			return
 		}
 	} else {
-		// Forward the request to the remote device
-		url := fmt.Sprintf("http://%s:%d/api/devices/%s/%s", device.Address, 9001, deviceID, action)
+		// Remote device: Forward request to another machine
+		forwardURL := fmt.Sprintf("http://%s:%d/api/devices/%s/%s", device.Address, 9001, deviceID, action)
+		log.Printf("Forwarding request to remote device: %s", forwardURL)
 
-		req, err := http.NewRequest("POST", url, nil)
+		transport := &http.Transport{
+			DisableKeepAlives: true, // Prevents connection reuse issues
+		}
+		client := &http.Client{
+			Timeout:   10 * time.Second,
+			Transport: transport,
+		}
+
+		req, err := http.NewRequest("POST", forwardURL, bytes.NewBuffer([]byte("{}")))
 		if err != nil {
+			log.Println("Failed to create request:", err)
 			http.Error(w, "Failed to create request", http.StatusInternalServerError)
 			return
 		}
+		req.Header.Set("Content-Type", "application/json")
 
-		client := &http.Client{Timeout: 5 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to forward request: %v", err), http.StatusBadGateway)
+			log.Println("Failed to forward request:", err)
+			http.Error(w, "Failed to forward request", http.StatusBadGateway)
 			return
 		}
 		defer resp.Body.Close()
 
+		// Update device syncing status based on response
+		if resp.StatusCode == http.StatusOK {
+			if action == "start-sync" {
+				device.Syncing = true
+			} else if action == "stop-sync" {
+				device.Syncing = false
+			}
+		} else {
+			log.Printf("Received non-200 status: %d from %s", resp.StatusCode, forwardURL)
+		}
+
 		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body) // Copy response body from remote device to the client
-		return
+		io.Copy(w, resp.Body)
 	}
 
+	// Save updated device status
 	s.memstore.SaveDevice(device)
 
+	// Respond with updated device state
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(device)
+	if err := json.NewEncoder(w).Encode(device); err != nil {
+		log.Println("Failed to encode response:", err)
+	}
 }
 
 func getDirectoryContents(dirPath string) ([]model.FileInfo, error) {

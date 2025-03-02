@@ -35,6 +35,46 @@ func GenerateDeviceID(configDir string) (string, error) {
 	return deviceID, nil
 }
 
+func GetDeviceID(configDir string) (string, error) {
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	deviceFalePath := filepath.Join(configDir, "device.json")
+
+	deviceID, err := loadDeviceID(deviceFalePath)
+	if err != nil {
+		return "", err
+	}
+
+	return deviceID, nil
+}
+
+func CreateConfig(configDir string, deviceID string) error {
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	deviceFalePath := filepath.Join(configDir, "device.json")
+
+	deviceInfo := DeviceInfo{
+		ID:        deviceID,
+		Name:      generateDeviceName(),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	data, err := json.MarshalIndent(deviceInfo, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal device info: %w", err)
+	}
+
+	if err := os.WriteFile(deviceFalePath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write device info")
+	}
+
+	return nil
+}
+
 func loadDeviceID(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
