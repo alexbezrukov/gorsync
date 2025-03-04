@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,18 +10,18 @@ import (
 	"gorsync/internal/memstore"
 	"gorsync/internal/model"
 	"gorsync/internal/server"
-	"io"
 	"log"
-	"net"
-	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"syscall"
-	"time"
 
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -105,25 +104,6 @@ func startService(cmd *cobra.Command, args []string) {
 	syncServer := setupSyncService(deviceID, port)
 	apiServer := setupAPIServer(syncServer)
 
-	device, err := getDevice(deviceID)
-	if err != nil {
-		log.Fatalf("Failed to get device: %v", err)
-	}
-
-	device.Syncing = true
-	device.LastSeenAt = time.Now()
-	localIP, err := getOutboundIP()
-	if err != nil {
-		fmt.Printf("Error getting outbound IP: %v\n", err)
-		localIP = net.IPv4zero
-	}
-	device.Address = localIP.String()
-	device.Port = port
-	err = updateDeviceInfo(deviceID, *device)
-	if err != nil {
-		log.Fatalf("Failed to update device: %v", err)
-	}
-
 	setupSignalHandling(ctx, cancel, syncServer, apiServer)
 }
 
@@ -155,23 +135,6 @@ func setupSignalHandling(ctx context.Context, cancel context.CancelFunc, syncSer
 	<-sigChan
 	fmt.Println("\nShutting down gracefully...")
 
-	configDir := getConfigDir()
-	deviceID, err := device.GetDeviceID(configDir)
-	if err != nil {
-		log.Fatalf("Failed to get device ID: %v", err)
-	}
-
-	device, err := getDevice(deviceID)
-	if err != nil {
-		log.Fatalf("Failed to get device: %v", err)
-	}
-
-	device.Syncing = false
-	err = updateDeviceInfo(deviceID, *device)
-	if err != nil {
-		log.Fatalf("Failed to update device: %v", err)
-	}
-
 	cancel()
 	syncServer.Stop()
 	apiServer.Stop(ctx)
@@ -185,25 +148,86 @@ var addDeviceCmd = &cobra.Command{
 	Run:   addDevice,
 }
 
+// addDevice is the CLI command handler for adding a new device
 func addDevice(cmd *cobra.Command, args []string) {
+	// Retrieve configuration values
+
+	// Validate inputs
+	if len(args) == 0 {
+		fmt.Println("Please provide a pairing code")
+		return
+	}
+
 	pairingCode := args[0]
 	if !isValidPairingCode(pairingCode) {
 		fmt.Println("Invalid pairing code format. Expected: XXXX-YYYY-ZZZZ-AAAA")
 		return
 	}
-	if err := registerAndSaveDevice(pairingCode); err != nil {
+
+	// Perform device registration
+	if err := registerAndSaveDevice(pairingCode, "https://cloud-relay.ru"); err != nil {
 		log.Fatalf("Failed to add device: %v", err)
 	}
+
 	fmt.Println("Device added successfully.")
 }
 
-func registerAndSaveDevice(pairingCode string) error {
-	dev, err := registerDevice(pairingCode)
+// registerAndSaveDevice handles the device registration process
+func registerAndSaveDevice(pairingCode string, relayServerURL string) error {
+	// Parse the relay server URL
+	u, err := url.Parse(relayServerURL)
 	if err != nil {
-		return err
+		return fmt.Errorf("invalid relay server URL: %v", err)
 	}
-	configDir := getConfigDir()
-	return device.CreateConfig(configDir, dev.ID)
+
+	// Construct WebSocket URL
+	u.Scheme = strings.Replace(u.Scheme, "http", "ws", 1)
+	wsURL := fmt.Sprintf("%s/ws?code=%s", u.String(), pairingCode)
+
+	// Establish WebSocket connection
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to connect to relay server: %v", err)
+	}
+	defer conn.Close()
+
+	// Generate a new device ID
+	deviceID := generateDeviceID()
+
+	// Prepare device registration payload
+	deviceInfo := model.Device{
+		ID:   deviceID,
+		Name: getLocalHostname(),
+	}
+	payload, err := json.Marshal(deviceInfo)
+	if err != nil {
+		return fmt.Errorf("failed to marshal device info: %v", err)
+	}
+
+	// Create registration message
+	registerMsg := model.Message{
+		Type:     model.MsgTypeRegister,
+		DeviceID: deviceID,
+		Payload:  payload,
+	}
+
+	// Send registration message
+	if err := conn.WriteJSON(registerMsg); err != nil {
+		return fmt.Errorf("failed to send registration message: %v", err)
+	}
+
+	// Optional: Wait for confirmation or handle response
+	var response model.Message
+	if err := conn.ReadJSON(&response); err != nil {
+		return fmt.Errorf("error reading server response: %v", err)
+	}
+
+	// Save device details locally (implement your preferred storage method)
+	// if err := saveDeviceLocally(deviceID, deviceInfo); err != nil {
+	// 	return fmt.Errorf("failed to save device locally: %v", err)
+	// }
+
+	return nil
 }
 
 func getConfigDir() string {
@@ -227,37 +251,6 @@ func isValidPairingCode(code string) bool {
 	return re.MatchString(code)
 }
 
-func registerDevice(pairingCode string) (*model.Device, error) {
-	apiURL := "http://localhost:8080/api/devices/add"
-
-	reqBody, err := json.Marshal(map[string]string{
-		"pairing_code": pairingCode,
-		"os":           detectOS(),
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := http.Post(apiURL, "application/json", bytes.NewBuffer(reqBody))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("server error: %s", string(body))
-	}
-
-	// Unmarshal the response into a Device struct
-	var device model.Device
-	if err := json.NewDecoder(resp.Body).Decode(&device); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &device, nil
-}
-
 // detectOS returns the current operating system
 func detectOS() string {
 	switch os := runtime.GOOS; os {
@@ -272,110 +265,25 @@ func detectOS() string {
 	}
 }
 
-func getDevice(deviceID string) (*model.Device, error) {
-	apiURL := fmt.Sprintf("http://localhost:8080/api/devices/%s", deviceID)
-
-	// Create a new HTTP request
-	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// Execute the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Handle response status
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("server error: %s", string(body))
-	}
-
-	var device model.Device
-	if err := json.NewDecoder(resp.Body).Decode(&device); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	log.Printf("Device found successfully: %+v", device.ID)
-	return &device, nil
+// generateDeviceID creates a unique device identifier
+func generateDeviceID() string {
+	// In a real implementation, this would be a more robust unique ID generation
+	return strings.ReplaceAll(uuid.New().String(), "-", "")
 }
 
-func updateDeviceInfo(deviceID string, updatedDevice model.Device) error {
-	apiURL := fmt.Sprintf("http://localhost:8080/api/devices/%s", deviceID)
-
-	// Marshal updated device data to JSON
-	reqBody, err := json.Marshal(updatedDevice)
+// getLocalHostname retrieves the device's hostname
+func getLocalHostname() string {
+	hostname, err := os.Hostname()
 	if err != nil {
-		return fmt.Errorf("failed to marshal request body: %w", err)
+		// Fallback to a default name with some unique identifier
+		return fmt.Sprintf("Device-%s", generateShortDeviceID())
 	}
-
-	// Create a new HTTP request
-	req, err := http.NewRequest(http.MethodPut, apiURL, bytes.NewBuffer(reqBody))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// Execute the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Handle response status
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server error: %s", string(body))
-	}
-
-	// Parse response body (if needed)
-	var updated model.Device
-	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	log.Printf("Device updated successfully: %+v", updated)
-	return nil
+	return hostname
 }
 
-// var addPeerCmd = &cobra.Command{
-// 	Use:   "add-peer",
-// 	Short: "Add a peer to sync with",
-// 	Args:  cobra.ExactArgs(2),
-// 	Run: func(cmd *cobra.Command, args []string) {
-// 		peerID := args[0]
-// 		peerAddress := args[1]
-// 		viper.SetConfigFile("config.yaml")
-// 		if err := viper.ReadInConfig(); err != nil {
-// 			log.Fatal("Failed to read config:", err)
-// 		}
-
-// 		peers := viper.GetStringMapString("devices")
-// 		peers[peerID] = peerAddress
-// 		viper.Set("devices", peers)
-// 		if err := viper.WriteConfig(); err != nil {
-// 			log.Fatal("Failed to save config:", err)
-// 		}
-
-// 		fmt.Println("Added peer:", peerID, "->", peerAddress)
-// 	},
-// }
-
-// getOutboundIP gets the preferred outbound IP of this machine
-func getOutboundIP() (net.IP, error) {
-	conn, err := net.Dial("udp", "8.8.8.8:80")
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-
-	localAddr := conn.LocalAddr().(*net.UDPAddr)
-	return localAddr.IP, nil
+// generateShortDeviceID creates a shortened unique identifier
+func generateShortDeviceID() string {
+	// Use first 8 characters of the UUID
+	fullID := strings.ReplaceAll(uuid.New().String(), "-", "")
+	return fullID[:8]
 }

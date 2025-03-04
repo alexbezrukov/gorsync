@@ -1,8 +1,21 @@
 package model
 
 import (
+	"encoding/json"
 	"time"
 )
+
+const (
+	MsgTypeRegister = "register"
+)
+
+// Message represents the WebSocket message structure
+type Message struct {
+	Type     string          `json:"type"`
+	DeviceID string          `json:"deviceId,omitempty"`
+	Payload  json.RawMessage `json:"payload,omitempty"`
+	TargetID string          `json:"targetId,omitempty"`
+}
 
 type PeerInfo struct {
 	IP       string `json:"ip"`

@@ -4,7 +4,9 @@ go 1.23.5
 
 require (
 	github.com/fsnotify/fsnotify v1.8.0
+	github.com/google/uuid v1.4.0
 	github.com/gorilla/mux v1.8.1
+	github.com/gorilla/websocket v1.5.3
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/viper v1.19.0
 	golang.org/x/sys v0.18.0
