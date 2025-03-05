@@ -155,11 +155,9 @@ func (d *Discovery) broadcastPresence() {
 	}
 
 	announcement := model.Device{
-		ID:       d.serviceID,
-		Name:     d.serviceName,
-		Address:  localIP.String(),
-		Port:     d.port,
-		Metadata: d.metadata,
+		ID:         d.serviceID,
+		Name:       d.serviceName,
+		PublicAddr: localIP.String(),
 	}
 
 	for {
@@ -209,28 +207,27 @@ func (d *Discovery) receiveAnnouncements() {
 			}
 
 			// Filter out our own announcements
-			if device.ID == d.serviceID {
-				device.Local = true
-			}
+			// if device.ID == d.serviceID {
+			// 	device.Local = true
+			// }
 
 			// If source address doesn't match the announced address, update it
 			// This helps with NAT and containers
-			if net.ParseIP(device.Address).IsUnspecified() {
-				device.Address = addr.IP.String()
+			if net.ParseIP(device.PublicAddr).IsUnspecified() {
+				device.PublicAddr = addr.IP.String()
 			}
-
-			device.LastSeenAt = time.Now()
 
 			d.mutex.Lock()
-			existingDevice, exists := d.devices[device.ID]
-			if exists {
-				existingDevice.Address = device.Address
-				existingDevice.LastSeenAt = time.Now()
-				existingDevice.Local = device.Local
-				existingDevice.Syncing = true
-			} else {
-				d.devices[device.ID] = &device
-			}
+			// existingDevice, exists := d.devices[device.ID]
+			// if exists {
+			// 	// existingDevice.Address = device.Address
+			// 	// existingDevice.LastSeenAt = time.Now()
+			// 	// existingDevice.Local = device.Local
+			// 	// existingDevice.Syncing = true
+			// } else {
+
+			// }
+			d.devices[device.ID] = &device
 			d.memstore.SaveDevice(d.devices[device.ID])
 			d.mutex.Unlock()
 		}
@@ -249,7 +246,7 @@ func (d *Discovery) cleanupStaleDevices() {
 			d.mutex.Lock()
 			for id, device := range d.devices {
 				// Remove services not seen for 60 seconds
-				if time.Since(device.LastSeenAt) > 60*time.Second {
+				if time.Since(device.LastSeen) > 60*time.Second {
 					delete(d.devices, id)
 				}
 			}

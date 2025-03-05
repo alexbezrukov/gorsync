@@ -1,14 +1,12 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"gorsync/internal/memstore"
 	"gorsync/internal/model"
 	"gorsync/internal/server"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -207,76 +205,76 @@ func (s *APIServer) syncDeviceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if device.Local {
-		// Local device: Start or Stop sync
-		if action == "start-sync" {
-			if s.cancel != nil {
-				s.cancel() // Cancel any existing sync process before starting a new one
-			}
+	// if device.Local {
+	// 	// Local device: Start or Stop sync
+	// 	if action == "start-sync" {
+	// 		if s.cancel != nil {
+	// 			s.cancel() // Cancel any existing sync process before starting a new one
+	// 		}
 
-			s.ctx, s.cancel = context.WithCancel(context.Background())
-			device.Syncing = true
-			log.Printf("Starting sync for local device: %s", deviceID)
+	// 		s.ctx, s.cancel = context.WithCancel(context.Background())
+	// 		device.Syncing = true
+	// 		log.Printf("Starting sync for local device: %s", deviceID)
 
-			go func() {
-				if err := s.sync.Start(s.ctx); err != nil {
-					log.Println("Sync server error:", err)
-				}
-			}()
-		} else if action == "stop-sync" {
-			if s.cancel != nil {
-				s.cancel() // Cancel the running sync process
-			}
-			device.Syncing = false
-			log.Printf("Stopping sync for local device: %s", deviceID)
-			s.sync.Stop()
-		} else {
-			http.Error(w, "Invalid action", http.StatusBadRequest)
-			return
-		}
-	} else {
-		// Remote device: Forward request to another machine
-		forwardURL := fmt.Sprintf("http://%s:%d/api/devices/%s/%s", device.Address, 9001, deviceID, action)
-		log.Printf("Forwarding request to remote device: %s", forwardURL)
+	// 		go func() {
+	// 			if err := s.sync.Start(s.ctx); err != nil {
+	// 				log.Println("Sync server error:", err)
+	// 			}
+	// 		}()
+	// 	} else if action == "stop-sync" {
+	// 		if s.cancel != nil {
+	// 			s.cancel() // Cancel the running sync process
+	// 		}
+	// 		device.Syncing = false
+	// 		log.Printf("Stopping sync for local device: %s", deviceID)
+	// 		s.sync.Stop()
+	// 	} else {
+	// 		http.Error(w, "Invalid action", http.StatusBadRequest)
+	// 		return
+	// 	}
+	// } else {
+	// 	// Remote device: Forward request to another machine
+	// 	forwardURL := fmt.Sprintf("http://%s:%d/api/devices/%s/%s", device.Address, 9001, deviceID, action)
+	// 	log.Printf("Forwarding request to remote device: %s", forwardURL)
 
-		transport := &http.Transport{
-			DisableKeepAlives: true, // Prevents connection reuse issues
-		}
-		client := &http.Client{
-			Timeout:   10 * time.Second,
-			Transport: transport,
-		}
+	// 	transport := &http.Transport{
+	// 		DisableKeepAlives: true, // Prevents connection reuse issues
+	// 	}
+	// 	client := &http.Client{
+	// 		Timeout:   10 * time.Second,
+	// 		Transport: transport,
+	// 	}
 
-		req, err := http.NewRequest("POST", forwardURL, bytes.NewBuffer([]byte("{}")))
-		if err != nil {
-			log.Println("Failed to create request:", err)
-			http.Error(w, "Failed to create request", http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
+	// 	req, err := http.NewRequest("POST", forwardURL, bytes.NewBuffer([]byte("{}")))
+	// 	if err != nil {
+	// 		log.Println("Failed to create request:", err)
+	// 		http.Error(w, "Failed to create request", http.StatusInternalServerError)
+	// 		return
+	// 	}
+	// 	req.Header.Set("Content-Type", "application/json")
 
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Println("Failed to forward request:", err)
-			http.Error(w, "Failed to forward request", http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
+	// 	resp, err := client.Do(req)
+	// 	if err != nil {
+	// 		log.Println("Failed to forward request:", err)
+	// 		http.Error(w, "Failed to forward request", http.StatusBadGateway)
+	// 		return
+	// 	}
+	// 	defer resp.Body.Close()
 
-		// Update device syncing status based on response
-		if resp.StatusCode == http.StatusOK {
-			if action == "start-sync" {
-				device.Syncing = true
-			} else if action == "stop-sync" {
-				device.Syncing = false
-			}
-		} else {
-			log.Printf("Received non-200 status: %d from %s", resp.StatusCode, forwardURL)
-		}
+	// 	// Update device syncing status based on response
+	// 	if resp.StatusCode == http.StatusOK {
+	// 		if action == "start-sync" {
+	// 			device.Syncing = true
+	// 		} else if action == "stop-sync" {
+	// 			device.Syncing = false
+	// 		}
+	// 	} else {
+	// 		log.Printf("Received non-200 status: %d from %s", resp.StatusCode, forwardURL)
+	// 	}
 
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
-	}
+	// 	w.WriteHeader(resp.StatusCode)
+	// 	io.Copy(w, resp.Body)
+	// }
 
 	// Save updated device status
 	s.memstore.SaveDevice(device)

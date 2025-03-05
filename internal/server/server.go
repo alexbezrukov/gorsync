@@ -259,14 +259,14 @@ func (s *SyncServer) connectToPeers(ctx context.Context) {
 					continue
 				}
 
-				address := fmt.Sprintf("%s:%d", device.Address, device.Port)
+				// address := fmt.Sprintf("%s:%d", device.Address, device.Port)
 
 				// If peer is new, log and connect
-				if s.peers[peerID] != address {
-					log.Printf("Discovered peer: %s at %s", peerID, address)
-					s.peers[peerID] = address
-					go s.establishConnection(peerID, address)
-				}
+				// if s.peers[peerID] != address {
+				// 	log.Printf("Discovered peer: %s at %s", peerID, address)
+				// 	s.peers[peerID] = address
+				// 	go s.establishConnection(peerID, address)
+				// }
 			}
 
 			s.connLock.Unlock()

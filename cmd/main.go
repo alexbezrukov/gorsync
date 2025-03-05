@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"gorsync/internal/api"
-	"gorsync/internal/device"
+	"gorsync/internal/client"
 	"gorsync/internal/discovery"
 	"gorsync/internal/memstore"
 	"gorsync/internal/model"
@@ -67,6 +67,50 @@ var initCmd = &cobra.Command{
 	Run:   initializeConfig,
 }
 
+var startCmd = &cobra.Command{
+	Use:   "pair [pairing-code]",
+	Short: "Pair device with sync network",
+	Args:  cobra.ExactArgs(1),
+	Run:   startPairing,
+}
+
+// CLI command to start pairing
+func startPairing(cmd *cobra.Command, args []string) {
+	// Retrieve configuration values
+	relayServerURL, _ := cmd.Flags().GetString("relay-server")
+	authToken, _ := cmd.Flags().GetString("auth-token")
+
+	// Validate inputs
+	if len(args) == 0 {
+		fmt.Println("Please provide a pairing code")
+		return
+	}
+
+	pairingCode := args[0]
+
+	// Create WebSocket client
+	c := client.NewWebSocketClient(relayServerURL, authToken)
+
+	// Connect to relay server
+	if err := c.Connect(); err != nil {
+		log.Fatalf("Failed to connect to relay server: %v", err)
+	}
+	defer c.Close()
+
+	// Start pairing process
+	if err := c.StartPairing(pairingCode); err != nil {
+		log.Fatalf("Pairing failed: %v", err)
+	}
+
+	// Start sync and wait
+	// if err := c.StartSync(); err != nil {
+	// 	log.Fatalf("Sync failed: %v", err)
+	// }
+
+	// Keep the connection alive
+	select {}
+}
+
 func initializeConfig(cmd *cobra.Command, args []string) {
 	configPath := "config.yaml"
 	if _, err := os.Stat(configPath); err == nil {
@@ -79,33 +123,33 @@ func initializeConfig(cmd *cobra.Command, args []string) {
 	fmt.Println("gorsync initialized successfully.")
 }
 
-var startCmd = &cobra.Command{
-	Use:   "start",
-	Short: "Start the sync service",
-	Run:   startService,
-}
+// var startCmd = &cobra.Command{
+// 	Use:   "start",
+// 	Short: "Start the sync service",
+// 	Run:   startService,
+// }
 
-func startService(cmd *cobra.Command, args []string) {
-	fmt.Println("Starting gorsync...")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+// func startService(cmd *cobra.Command, args []string) {
+// 	fmt.Println("Starting gorsync...")
+// 	ctx, cancel := context.WithCancel(context.Background())
+// 	defer cancel()
 
-	configDir := getConfigDir()
-	if err := loadConfig(); err != nil {
-		log.Fatalf("Failed to load config: %v", err)
-	}
+// 	configDir := getConfigDir()
+// 	if err := loadConfig(); err != nil {
+// 		log.Fatalf("Failed to load config: %v", err)
+// 	}
 
-	deviceID, err := device.GetDeviceID(configDir)
-	if err != nil {
-		log.Fatalf("Failed to generate device ID: %v", err)
-	}
+// 	deviceID, err := device.GetDeviceID(configDir)
+// 	if err != nil {
+// 		log.Fatalf("Failed to generate device ID: %v", err)
+// 	}
 
-	port := viper.GetInt("port")
-	syncServer := setupSyncService(deviceID, port)
-	apiServer := setupAPIServer(syncServer)
+// 	port := viper.GetInt("port")
+// 	syncServer := setupSyncService(deviceID, port)
+// 	apiServer := setupAPIServer(syncServer)
 
-	setupSignalHandling(ctx, cancel, syncServer, apiServer)
-}
+// 	setupSignalHandling(ctx, cancel, syncServer, apiServer)
+// }
 
 func setupSyncService(deviceID string, port int) *server.SyncServer {
 	syncDir := viper.GetString("sync_directory")
@@ -222,10 +266,126 @@ func registerAndSaveDevice(pairingCode string, relayServerURL string) error {
 		return fmt.Errorf("error reading server response: %v", err)
 	}
 
-	// Save device details locally (implement your preferred storage method)
+	if response.Type == model.MsgTypeError {
+		var errMsg struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(response.Payload, &errMsg); err == nil {
+			return fmt.Errorf("server error: %s", errMsg.Error)
+		}
+		return fmt.Errorf("unknown server error")
+	}
+
+	// fmt.Println("response", response)
+
+	// // Save device details locally (implement your preferred storage method)
 	// if err := saveDeviceLocally(deviceID, deviceInfo); err != nil {
 	// 	return fmt.Errorf("failed to save device locally: %v", err)
 	// }
+
+	return nil
+}
+
+// saveDeviceLocally saves the device information to a JSON file
+func saveDeviceLocally(deviceID string, deviceInfo model.Device) error {
+	// Ensure config directory exists
+	configDir := getConfigDir()
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		return fmt.Errorf("failed to create config directory: %v", err)
+	}
+
+	// Path to the devices configuration file
+	configPath := filepath.Join(configDir, "devices.json")
+
+	// Read existing configuration
+	var config model.DeviceConfig
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("error reading existing config: %v", err)
+		}
+		// Initialize new config if file doesn't exist
+		config = model.DeviceConfig{
+			Devices: make(map[string]model.Device),
+		}
+	} else {
+		// Unmarshal existing configuration
+		if err := json.Unmarshal(configData, &config); err != nil {
+			return fmt.Errorf("error parsing existing config: %v", err)
+		}
+	}
+
+	// Add or update device
+	config.Devices[deviceID] = deviceInfo
+
+	// Marshal the updated configuration
+	updatedConfigData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal device config: %v", err)
+	}
+
+	// Write the updated configuration
+	if err := os.WriteFile(configPath, updatedConfigData, 0600); err != nil {
+		return fmt.Errorf("failed to write device config: %v", err)
+	}
+
+	return nil
+}
+
+// loadDevicesFromConfig reads the devices from the local configuration
+func loadDevicesFromConfig() (map[string]model.Device, error) {
+	configDir := getConfigDir()
+	configPath := filepath.Join(configDir, "devices.json")
+
+	// Read configuration file
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Return empty map if no config exists
+			return make(map[string]model.Device), nil
+		}
+		return nil, fmt.Errorf("error reading device config: %v", err)
+	}
+
+	// Parse configuration
+	var config model.DeviceConfig
+	if err := json.Unmarshal(configData, &config); err != nil {
+		return nil, fmt.Errorf("error parsing device config: %v", err)
+	}
+
+	return config.Devices, nil
+}
+
+// removeDeviceFromConfig removes a specific device from the local configuration
+func removeDeviceFromConfig(deviceID string) error {
+	configDir := getConfigDir()
+	configPath := filepath.Join(configDir, "devices.json")
+
+	// Read existing configuration
+	var config model.DeviceConfig
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("error reading existing config: %v", err)
+	}
+
+	// Unmarshal existing configuration
+	if err := json.Unmarshal(configData, &config); err != nil {
+		return fmt.Errorf("error parsing existing config: %v", err)
+	}
+
+	// Remove the device
+	delete(config.Devices, deviceID)
+
+	// Marshal the updated configuration
+	updatedConfigData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal device config: %v", err)
+	}
+
+	// Write the updated configuration
+	if err := os.WriteFile(configPath, updatedConfigData, 0600); err != nil {
+		return fmt.Errorf("failed to write device config: %v", err)
+	}
 
 	return nil
 }

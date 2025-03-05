@@ -5,13 +5,24 @@ import (
 	"time"
 )
 
+// MessageType defines the type of message being sent
+type MessageType string
+
 const (
-	MsgTypeRegister = "register"
+	MsgTypeRegister     MessageType = "register"
+	MsgTypePeerRequest  MessageType = "peer_request"
+	MsgTypeICECandidate MessageType = "ice_candidate"
+	MsgTypeOffer        MessageType = "offer"
+	MsgTypeAnswer       MessageType = "answer"
+	MsgTypeFileMetadata MessageType = "file_metadata"
+	MsgTypeFileRequest  MessageType = "file_request"
+	MsgTypeFileChunk    MessageType = "file_chunk"
+	MsgTypeError        MessageType = "error"
 )
 
 // Message represents the WebSocket message structure
 type Message struct {
-	Type     string          `json:"type"`
+	Type     MessageType     `json:"type"`
 	DeviceID string          `json:"deviceId,omitempty"`
 	Payload  json.RawMessage `json:"payload,omitempty"`
 	TargetID string          `json:"targetId,omitempty"`
@@ -89,15 +100,12 @@ type SyncMessage struct {
 
 // Device contains information about a device
 type Device struct {
-	ID         string            `json:"id"`
-	Name       string            `json:"name"`
-	Address    string            `json:"address"`
-	Port       int               `json:"port"`
-	Metadata   map[string]string `json:"metadata,omitempty"`
-	LastSeenAt time.Time         `json:"lastSeenAt"`
-	Local      bool              `json:"local"`
-	Syncing    bool              `json:"syncing"`
-	Settings   DeviceSettings    `json:"settings"`
+	ID         string         `json:"id"`
+	Name       string         `json:"name"`
+	LastSeen   time.Time      `json:"lastSeen"`
+	IsOnline   bool           `json:"isOnline"`
+	PublicAddr string         `json:"publicAddr"`
+	Settings   DeviceSettings `json:"settings"`
 }
 
 // DeviceSettings represents the settings of a device
@@ -106,6 +114,11 @@ type DeviceSettings struct {
 	AutoSync         bool   `json:"autoSync"`
 	BandwidthLimit   int    `json:"bandwidthLimit"`
 	ExcludeFileTypes string `json:"excludeFileTypes"`
+}
+
+// DeviceConfig represents the structure for storing device information locally
+type DeviceConfig struct {
+	Devices map[string]Device `json:"devices"`
 }
 
 // type SyncServer struct {
