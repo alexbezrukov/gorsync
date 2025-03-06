@@ -18,14 +18,16 @@ const (
 	MsgTypeFileRequest  MessageType = "file_request"
 	MsgTypeFileChunk    MessageType = "file_chunk"
 	MsgTypeError        MessageType = "error"
+	MsgDeviceUpdate     MessageType = "device_update"
 )
 
 // Message represents the WebSocket message structure
 type Message struct {
-	Type     MessageType     `json:"type"`
-	DeviceID string          `json:"deviceId,omitempty"`
-	Payload  json.RawMessage `json:"payload,omitempty"`
-	TargetID string          `json:"targetId,omitempty"`
+	Type      MessageType     `json:"type"`
+	DeviceID  string          `json:"deviceId"`
+	TargetID  string          `json:"targetId,omitempty"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	Timestamp time.Time       `json:"timestamp"`
 }
 
 type PeerInfo struct {
@@ -100,12 +102,13 @@ type SyncMessage struct {
 
 // Device contains information about a device
 type Device struct {
-	ID         string         `json:"id"`
-	Name       string         `json:"name"`
-	LastSeen   time.Time      `json:"lastSeen"`
-	IsOnline   bool           `json:"isOnline"`
-	PublicAddr string         `json:"publicAddr"`
-	Settings   DeviceSettings `json:"settings"`
+	ID          string         `json:"id"`
+	Name        string         `json:"name"`
+	LastSeen    time.Time      `json:"lastSeen"`
+	IsOnline    bool           `json:"isOnline"`
+	PublicAddr  string         `json:"publicAddr"`
+	PairingCode string         `json:"pairingCode"`
+	Settings    DeviceSettings `json:"settings"`
 }
 
 // DeviceSettings represents the settings of a device

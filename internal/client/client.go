@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
@@ -19,17 +20,15 @@ import (
 type WebSocketClient struct {
 	conn           *websocket.Conn
 	relayServerURL string
-	pairingCode    string
 	deviceID       string
 	devices        map[string]model.Device
 	devicesMutex   sync.RWMutex
 }
 
 // NewWebSocketClient creates a new WebSocket client
-func NewWebSocketClient(relayServerURL, pairingCode string) *WebSocketClient {
+func NewWebSocketClient(relayServerURL string) *WebSocketClient {
 	return &WebSocketClient{
 		relayServerURL: relayServerURL,
-		pairingCode:    pairingCode,
 		devices:        make(map[string]model.Device),
 	}
 }
@@ -44,7 +43,7 @@ func (c *WebSocketClient) Connect() error {
 
 	// Construct WebSocket URL
 	u.Scheme = strings.Replace(u.Scheme, "http", "ws", 1)
-	wsURL := fmt.Sprintf("%s/ws?code=%s", u.String(), c.pairingCode)
+	wsURL := fmt.Sprintf("%s/ws", u.String())
 
 	// Establish WebSocket connection
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
@@ -54,6 +53,47 @@ func (c *WebSocketClient) Connect() error {
 
 	c.conn = conn
 	return nil
+}
+
+// waitForDeviceUpdate waits for a device update message from the server
+func (c *WebSocketClient) WaitForDeviceUpdate() (*model.Device, error) {
+	// Set a timeout for waiting for the device update
+	c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	defer c.conn.SetReadDeadline(time.Time{}) // Clear deadline
+
+	for {
+		// Read message
+		_, msgBytes, err := c.conn.ReadMessage()
+		if err != nil {
+			return nil, fmt.Errorf("error reading WebSocket message: %v", err)
+		}
+
+		// Parse message
+		var msg model.Message
+		if err := json.Unmarshal(msgBytes, &msg); err != nil {
+			return nil, fmt.Errorf("error parsing message: %v", err)
+		}
+
+		// Check for device update message
+		if msg.Type == model.MsgDeviceUpdate {
+			var deviceInfo model.Device
+			if err := json.Unmarshal(msg.Payload, &deviceInfo); err != nil {
+				return nil, fmt.Errorf("error parsing device info: %v", err)
+			}
+			return &deviceInfo, nil
+		}
+
+		// Optional: Handle other message types or unexpected messages
+		if msg.Type == model.MsgTypeError {
+			var errMsg struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(msg.Payload, &errMsg); err == nil {
+				return nil, fmt.Errorf("server error: %s", errMsg.Error)
+			}
+			return nil, fmt.Errorf("unknown server error")
+		}
+	}
 }
 
 // Close terminates the WebSocket connection
@@ -77,9 +117,35 @@ func (c *WebSocketClient) StartPairing(pairingCode string) error {
 		return fmt.Errorf("not connected to relay server")
 	}
 
+	// Generate a new device ID
+	deviceID := generateDeviceID()
+
+	// Prepare device registration payload
+	deviceInfo := model.Device{
+		ID:          deviceID,
+		Name:        getLocalHostname(),
+		PairingCode: pairingCode,
+	}
+	payload, err := json.Marshal(deviceInfo)
+	if err != nil {
+		return fmt.Errorf("failed to marshal device info: %v", err)
+	}
+
+	// Create registration message
+	registerMsg := model.Message{
+		Type:     model.MsgTypeRegister,
+		DeviceID: deviceID,
+		Payload:  payload,
+	}
+
+	// Send registration message
+	if err := c.conn.WriteJSON(registerMsg); err != nil {
+		return fmt.Errorf("failed to send registration message: %v", err)
+	}
+
 	// Prepare pairing message
 	pairingMsg := model.Message{
-		Type:    "start_pairing",
+		Type:    model.MsgTypeRegister,
 		Payload: json.RawMessage(fmt.Sprintf(`{"pairingCode": "%s"}`, pairingCode)),
 	}
 
@@ -213,4 +279,27 @@ func getConfigDir() string {
 		return filepath.Join(xdgConfigHome, "gorsync")
 	}
 	return filepath.Join(homeDir, ".gorsync")
+}
+
+// generateDeviceID creates a unique device identifier
+func generateDeviceID() string {
+	// In a real implementation, this would be a more robust unique ID generation
+	return strings.ReplaceAll(uuid.New().String(), "-", "")
+}
+
+// getLocalHostname retrieves the device's hostname
+func getLocalHostname() string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		// Fallback to a default name with some unique identifier
+		return fmt.Sprintf("Device-%s", generateShortDeviceID())
+	}
+	return hostname
+}
+
+// generateShortDeviceID creates a shortened unique identifier
+func generateShortDeviceID() string {
+	// Use first 8 characters of the UUID
+	fullID := strings.ReplaceAll(uuid.New().String(), "-", "")
+	return fullID[:8]
 }
