@@ -58,7 +58,7 @@ func (c *WebSocketClient) Connect() error {
 // waitForDeviceUpdate waits for a device update message from the server
 func (c *WebSocketClient) WaitForDeviceUpdate() (*model.Device, error) {
 	// Set a timeout for waiting for the device update
-	c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	_ = c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	defer c.conn.SetReadDeadline(time.Time{}) // Clear deadline
 
 	for {
@@ -117,6 +117,17 @@ func (c *WebSocketClient) StartPairing(pairingCode string) error {
 		return fmt.Errorf("not connected to relay server")
 	}
 
+	// Prepare pairing message
+	// pairingMsg := model.Message{
+	// 	Type:    model.MsgTypeRegister,
+	// 	Payload: json.RawMessage(fmt.Sprintf(`{"pairingCode": "%s"}`, pairingCode)),
+	// }
+
+	// // Send pairing request
+	// if err := c.conn.WriteJSON(pairingMsg); err != nil {
+	// 	return fmt.Errorf("failed to send pairing request: %v", err)
+	// }
+
 	// Generate a new device ID
 	deviceID := generateDeviceID()
 
@@ -141,17 +152,6 @@ func (c *WebSocketClient) StartPairing(pairingCode string) error {
 	// Send registration message
 	if err := c.conn.WriteJSON(registerMsg); err != nil {
 		return fmt.Errorf("failed to send registration message: %v", err)
-	}
-
-	// Prepare pairing message
-	pairingMsg := model.Message{
-		Type:    model.MsgTypeRegister,
-		Payload: json.RawMessage(fmt.Sprintf(`{"pairingCode": "%s"}`, pairingCode)),
-	}
-
-	// Send pairing request
-	if err := c.conn.WriteJSON(pairingMsg); err != nil {
-		return fmt.Errorf("failed to send pairing request: %v", err)
 	}
 
 	return nil

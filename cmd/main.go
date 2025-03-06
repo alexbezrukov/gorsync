@@ -38,7 +38,7 @@ func main() {
 }
 
 func init() {
-	rootCmd.AddCommand(initCmd, addDeviceCmd)
+	rootCmd.AddCommand(initCmd, pairCmd)
 }
 
 var rootCmd = &cobra.Command{
@@ -52,14 +52,14 @@ var initCmd = &cobra.Command{
 	Run:   initializeConfig,
 }
 
-var addDeviceCmd = &cobra.Command{
-	Use:   "add-device [pairing-code]",
+var pairCmd = &cobra.Command{
+	Use:   "pair [pairing-code]",
 	Short: "Add a new device using a pairing code",
 	Args:  cobra.ExactArgs(1),
-	Run:   addDevice,
+	Run:   pair,
 }
 
-func addDevice(cmd *cobra.Command, args []string) {
+func pair(cmd *cobra.Command, args []string) {
 	// Validate inputs
 	if len(args) == 0 {
 		fmt.Println("Please provide a pairing code")
