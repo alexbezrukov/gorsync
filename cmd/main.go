@@ -6,7 +6,6 @@ import (
 	"gorsync/internal/api"
 	"gorsync/internal/client"
 	"gorsync/internal/deviceInfo"
-	"gorsync/internal/discovery"
 	"gorsync/internal/memstore"
 	"gorsync/internal/server"
 	"log"
@@ -96,7 +95,7 @@ func pair(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	device, err := c.StartPairing(pairingCode)
+	device, err := c.StartPairing(pairingCode, 9000)
 	if err != nil {
 		log.Fatalf("Failed to start pairing: %s\n", err)
 		return
@@ -146,13 +145,12 @@ func start(cmd *cobra.Command, args []string) {
 
 func setupSyncServer(deviceID string, port int) *server.SyncServer {
 	syncDir := viper.GetString("sync_directory")
-	discovery := discovery.NewDiscovery(deviceID,
-		"file-syncer", 9000, memstore.NewMemStore())
-	if err := discovery.Start(); err != nil {
-		log.Fatalf("Failed to start discovery: %v", err)
-	}
+	// discovery := discovery.NewDiscovery(deviceID, "file-syncer", 9000, memstore.NewMemStore())
+	// if err := discovery.Start(); err != nil {
+	// 	log.Fatalf("Failed to start discovery: %v", err)
+	// }
 
-	syncServer := server.NewSyncServer(deviceID, port, syncDir, discovery)
+	syncServer := server.NewSyncServer(deviceID, port, syncDir, "https://cloud-relay.ru")
 	go func() {
 		if err := syncServer.Start(context.Background()); err != nil {
 			log.Fatalf("Server error: %v", err)

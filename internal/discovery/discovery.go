@@ -152,9 +152,9 @@ func (d *Discovery) broadcastPresence() {
 	}
 
 	announcement := model.Device{
-		ID:         d.serviceID,
-		Name:       d.serviceName,
-		PublicAddr: localIP.String(),
+		ID:      d.serviceID,
+		Name:    d.serviceName,
+		Address: localIP.String(),
 	}
 
 	for {
@@ -210,8 +210,8 @@ func (d *Discovery) receiveAnnouncements() {
 
 			// If source address doesn't match the announced address, update it
 			// This helps with NAT and containers
-			if net.ParseIP(device.PublicAddr).IsUnspecified() {
-				device.PublicAddr = addr.IP.String()
+			if net.ParseIP(device.Address).IsUnspecified() {
+				device.Address = addr.IP.String()
 			}
 
 			d.mutex.Lock()

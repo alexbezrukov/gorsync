@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/gob"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"gorsync/internal/discovery"
+	"gorsync/internal/client"
+	"gorsync/internal/memstore"
 	"gorsync/internal/model"
 	"io"
 	"log"
@@ -30,14 +32,15 @@ type SyncServer struct {
 	deviceID     string
 	port         int
 	syncDir      string
-	peers        map[string]string
 	metadata     map[string]model.FileMetadata
 	connections  map[string]*Connection
 	metadataLock sync.RWMutex
 	connLock     sync.RWMutex
 	watcher      *fsnotify.Watcher
-	discovery    *discovery.Discovery
-	listener     net.Listener
+	// discovery       *discovery.Discovery
+	listener net.Listener
+	memstore *memstore.MemStore
+	client   *client.WebSocketClient
 }
 
 type Connection struct {
@@ -46,15 +49,16 @@ type Connection struct {
 	decoder *gob.Decoder
 }
 
-func NewSyncServer(deviceID string, port int, syncDir string, discovery *discovery.Discovery) *SyncServer {
+func NewSyncServer(deviceID string, port int, syncDir string, relayServerAddr string) *SyncServer {
 	return &SyncServer{
 		deviceID:    deviceID,
 		port:        port,
 		syncDir:     syncDir,
-		peers:       make(map[string]string),
 		metadata:    make(map[string]model.FileMetadata),
 		connections: make(map[string]*Connection),
-		discovery:   discovery,
+		// discovery:       discovery,
+		memstore: memstore.NewMemStore(),
+		client:   client.NewWebSocketClient(relayServerAddr),
 	}
 }
 
@@ -75,6 +79,10 @@ func (s *SyncServer) Start(ctx context.Context) error {
 
 	if err := s.initializeMetadata(); err != nil {
 		return fmt.Errorf("failed to initialize metadata: %w", err)
+	}
+
+	if err := s.connectToRelayServer(ctx); err != nil {
+		return fmt.Errorf("failed to connect to relay server: %w", err)
 	}
 
 	s.listener, err = net.Listen("tcp", fmt.Sprintf(":%d", s.port))
@@ -134,109 +142,46 @@ func (s *SyncServer) Stop() {
 	log.Println("Sync server stopped")
 }
 
-// func (s *SyncServer) connectToPeers(ctx context.Context) {
-// 	ticker := time.NewTicker(3 * time.Second)
-// 	defer ticker.Stop()
+func (s *SyncServer) connectToRelayServer(ctx context.Context) error {
+	s.client.Connect()
 
-// 	// Track connection attempts to avoid duplicate attempts
-// 	connectionAttempts := make(map[string]time.Time)
-// 	connectionTimeout := 30 * time.Second
+	go s.client.HandleMessages(ctx, s.processMessage)
 
-// 	for {
-// 		select {
-// 		case <-ctx.Done():
-// 			log.Println("Stopping peer discovery")
-// 			return
-// 		case <-ticker.C:
-// 			services := s.discovery.GetServicesByName("file-syncer")
+	if err := s.getPeers(); err != nil {
+		return fmt.Errorf("failed to get peers from relay: %w", err)
+	}
 
-// 			// Create a set of current peers for detecting disconnections
-// 			activePeers := make(map[string]bool)
+	return nil
+}
 
-// 			s.connLock.Lock()
+// registerWithRelay registers this device with the relay server
+func (s *SyncServer) getPeers() error {
+	registerMsg := model.Message{
+		Type:      model.MsgTypePeerRequest,
+		DeviceID:  s.deviceID,
+		Timestamp: time.Now(),
+	}
 
-// 			// Process discovered peers
-// 			for _, service := range services {
-// 				peerID := service.ID
+	return s.client.SendMessage(registerMsg)
+}
 
-// 				// Mark as active
-// 				activePeers[peerID] = true
+func (s *SyncServer) processMessage(msg model.Message) {
+	switch msg.Type {
+	case model.MsgTypePeerRequest:
+		var peers []*model.Device
 
-// 				// Ignore self-discovery
-// 				if peerID == s.deviceID {
-// 					continue
-// 				}
+		if err := json.Unmarshal(msg.Payload, &peers); err != nil {
+			log.Printf("Error parsing peer list: %v", err)
+			return
+		}
 
-// 				address := fmt.Sprintf("%s:%d", service.Address, service.Port)
+		fmt.Println("peers", peers)
 
-// 				// Check if it's a new peer or address has changed
-// 				currentAddr, exists := s.peers[peerID]
-// 				if !exists || currentAddr != address {
-// 					var peerStatus string
-// 					if exists {
-// 						peerStatus = "updated"
-// 					} else {
-// 						peerStatus = "new"
-// 					}
-// 					log.Printf("Discovered %s peer: %s at %s", peerStatus, peerID, address)
-// 					s.peers[peerID] = address
-
-// 					// Clear previous connection attempt if address changed
-// 					delete(connectionAttempts, peerID)
-// 				}
-// 			}
-
-// 			// Detect and remove peers that are no longer available
-// 			for peerID := range s.peers {
-// 				if peerID != s.deviceID && !activePeers[peerID] {
-// 					log.Printf("Peer %s is no longer available, removing", peerID)
-// 					delete(s.peers, peerID)
-// 					delete(connectionAttempts, peerID)
-// 					// Consider closing existing connections here if you track them
-// 				}
-// 			}
-
-// 			// Launch connection attempts with rate limiting
-// 			now := time.Now()
-// 			maxConcurrentAttempts := 3 // Limit concurrent connection attempts
-// 			activeAttempts := 0
-
-// 			for peerID, addr := range s.peers {
-// 				// Skip if we've recently attempted to connect
-// 				lastAttempt, hasAttempted := connectionAttempts[peerID]
-// 				if hasAttempted && now.Sub(lastAttempt) < connectionTimeout {
-// 					continue
-// 				}
-
-// 				// Limit concurrent connection attempts
-// 				if activeAttempts >= maxConcurrentAttempts {
-// 					break
-// 				}
-
-// 				// Record connection attempt time
-// 				connectionAttempts[peerID] = now
-// 				activeAttempts++
-
-// 				go func(id string, address string) {
-// 					success := s.establishConnection(id, address)
-
-// 					// Update the attempt time based on result
-// 					s.connLock.Lock()
-// 					if !success {
-// 						// If failed, set a shorter retry interval
-// 						connectionAttempts[id] = now.Add(-connectionTimeout + (5 * time.Second))
-// 					} else {
-// 						// If successful, no need to retry for a longer period
-// 						connectionAttempts[id] = now
-// 					}
-// 					s.connLock.Unlock()
-// 				}(peerID, addr)
-// 			}
-
-// 			s.connLock.Unlock()
-// 		}
-// 	}
-// }
+		for _, peer := range peers {
+			s.memstore.SaveDevice(peer)
+		}
+	}
+}
 
 func (s *SyncServer) connectToPeers(ctx context.Context) {
 	ticker := time.NewTicker(3 * time.Second)
@@ -248,7 +193,7 @@ func (s *SyncServer) connectToPeers(ctx context.Context) {
 			log.Println("Stopping peer discovery")
 			return
 		case <-ticker.C:
-			devices := s.discovery.GetDevicesByName("file-syncer")
+			devices := s.memstore.GetDevices()
 
 			s.connLock.Lock()
 
@@ -259,14 +204,16 @@ func (s *SyncServer) connectToPeers(ctx context.Context) {
 					continue
 				}
 
-				// address := fmt.Sprintf("%s:%d", device.Address, device.Port)
+				address := fmt.Sprintf("%s:%d", device.Address, device.Port)
+				for _, peer := range devices {
+					// If peer is new, log and connect
+					if peer.Address != address {
+						log.Printf("Discovered peer: %s at %s", peerID, address)
+						peer.Address = address
+						go s.establishConnection(peerID, address)
+					}
+				}
 
-				// If peer is new, log and connect
-				// if s.peers[peerID] != address {
-				// 	log.Printf("Discovered peer: %s at %s", peerID, address)
-				// 	s.peers[peerID] = address
-				// 	go s.establishConnection(peerID, address)
-				// }
 			}
 
 			s.connLock.Unlock()
@@ -772,3 +719,107 @@ func (s *SyncServer) verifyChecksum(path string, expectedChecksum string) (bool,
 	}
 	return actualChecksum == expectedChecksum, nil
 }
+
+// func (s *SyncServer) connectToPeers(ctx context.Context) {
+// 	ticker := time.NewTicker(3 * time.Second)
+// 	defer ticker.Stop()
+
+// 	// Track connection attempts to avoid duplicate attempts
+// 	connectionAttempts := make(map[string]time.Time)
+// 	connectionTimeout := 30 * time.Second
+
+// 	for {
+// 		select {
+// 		case <-ctx.Done():
+// 			log.Println("Stopping peer discovery")
+// 			return
+// 		case <-ticker.C:
+// 			services := s.discovery.GetServicesByName("file-syncer")
+
+// 			// Create a set of current peers for detecting disconnections
+// 			activePeers := make(map[string]bool)
+
+// 			s.connLock.Lock()
+
+// 			// Process discovered peers
+// 			for _, service := range services {
+// 				peerID := service.ID
+
+// 				// Mark as active
+// 				activePeers[peerID] = true
+
+// 				// Ignore self-discovery
+// 				if peerID == s.deviceID {
+// 					continue
+// 				}
+
+// 				address := fmt.Sprintf("%s:%d", service.Address, service.Port)
+
+// 				// Check if it's a new peer or address has changed
+// 				currentAddr, exists := s.peers[peerID]
+// 				if !exists || currentAddr != address {
+// 					var peerStatus string
+// 					if exists {
+// 						peerStatus = "updated"
+// 					} else {
+// 						peerStatus = "new"
+// 					}
+// 					log.Printf("Discovered %s peer: %s at %s", peerStatus, peerID, address)
+// 					s.peers[peerID] = address
+
+// 					// Clear previous connection attempt if address changed
+// 					delete(connectionAttempts, peerID)
+// 				}
+// 			}
+
+// 			// Detect and remove peers that are no longer available
+// 			for peerID := range s.peers {
+// 				if peerID != s.deviceID && !activePeers[peerID] {
+// 					log.Printf("Peer %s is no longer available, removing", peerID)
+// 					delete(s.peers, peerID)
+// 					delete(connectionAttempts, peerID)
+// 					// Consider closing existing connections here if you track them
+// 				}
+// 			}
+
+// 			// Launch connection attempts with rate limiting
+// 			now := time.Now()
+// 			maxConcurrentAttempts := 3 // Limit concurrent connection attempts
+// 			activeAttempts := 0
+
+// 			for peerID, addr := range s.peers {
+// 				// Skip if we've recently attempted to connect
+// 				lastAttempt, hasAttempted := connectionAttempts[peerID]
+// 				if hasAttempted && now.Sub(lastAttempt) < connectionTimeout {
+// 					continue
+// 				}
+
+// 				// Limit concurrent connection attempts
+// 				if activeAttempts >= maxConcurrentAttempts {
+// 					break
+// 				}
+
+// 				// Record connection attempt time
+// 				connectionAttempts[peerID] = now
+// 				activeAttempts++
+
+// 				go func(id string, address string) {
+// 					success := s.establishConnection(id, address)
+
+// 					// Update the attempt time based on result
+// 					s.connLock.Lock()
+// 					if !success {
+// 						// If failed, set a shorter retry interval
+// 						connectionAttempts[id] = now.Add(-connectionTimeout + (5 * time.Second))
+// 					} else {
+// 						// If successful, no need to retry for a longer period
+// 						connectionAttempts[id] = now
+// 					}
+// 					s.connLock.Unlock()
+// 				}(peerID, addr)
+// 			}
+
+// 			s.connLock.Unlock()
+// 		}
+// 	}
+// }

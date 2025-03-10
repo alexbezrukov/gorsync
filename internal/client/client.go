@@ -1,17 +1,19 @@
 package client
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"gorsync/internal/deviceInfo"
 	"gorsync/internal/model"
+	"io"
 	"log"
+	"math/rand/v2"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,16 +24,12 @@ import (
 type WebSocketClient struct {
 	conn           *websocket.Conn
 	relayServerURL string
-	deviceID       string
-	devices        map[string]model.Device
-	devicesMutex   sync.RWMutex
 }
 
 // NewWebSocketClient creates a new WebSocket client
 func NewWebSocketClient(relayServerURL string) *WebSocketClient {
 	return &WebSocketClient{
 		relayServerURL: relayServerURL,
-		devices:        make(map[string]model.Device),
 	}
 }
 
@@ -57,47 +55,6 @@ func (c *WebSocketClient) Connect() error {
 	return nil
 }
 
-// waitForDeviceUpdate waits for a device update message from the server
-func (c *WebSocketClient) WaitForDeviceUpdate() (*model.Device, error) {
-	// Set a timeout for waiting for the device update
-	_ = c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-	defer c.conn.SetReadDeadline(time.Time{}) // Clear deadline
-
-	for {
-		// Read message
-		_, msgBytes, err := c.conn.ReadMessage()
-		if err != nil {
-			return nil, fmt.Errorf("error reading WebSocket message: %v", err)
-		}
-
-		// Parse message
-		var msg model.Message
-		if err := json.Unmarshal(msgBytes, &msg); err != nil {
-			return nil, fmt.Errorf("error parsing message: %v", err)
-		}
-
-		// Check for device update message
-		if msg.Type == model.MsgDeviceUpdate {
-			var deviceInfo model.Device
-			if err := json.Unmarshal(msg.Payload, &deviceInfo); err != nil {
-				return nil, fmt.Errorf("error parsing device info: %v", err)
-			}
-			return &deviceInfo, nil
-		}
-
-		// Optional: Handle other message types or unexpected messages
-		if msg.Type == model.MsgTypeError {
-			var errMsg struct {
-				Error string `json:"error"`
-			}
-			if err := json.Unmarshal(msg.Payload, &errMsg); err == nil {
-				return nil, fmt.Errorf("server error: %s", errMsg.Error)
-			}
-			return nil, fmt.Errorf("unknown server error")
-		}
-	}
-}
-
 // Close terminates the WebSocket connection
 func (c *WebSocketClient) Close() error {
 	if c.conn == nil {
@@ -114,15 +71,25 @@ func (c *WebSocketClient) Close() error {
 }
 
 // StartPairing initiates the device pairing process
-func (c *WebSocketClient) StartPairing(pairingCode string) (*model.Device, error) {
+func (c *WebSocketClient) StartPairing(pairingCode string, port int) (*model.Device, error) {
 	if c.conn == nil {
 		return nil, fmt.Errorf("not connected to relay server")
 	}
 
 	// Generate a new device ID
-	deviceID, err := deviceInfo.GenerateDeviceID(deviceInfo.GetConfigDir())
+	deviceID, err := generateDeviceID()
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate device id: %s", err)
+		return nil, fmt.Errorf("failed to generate device ID: %w", err)
+	}
+
+	localIP, err := getOutboundIP()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get outbound ip: %w", err)
+	}
+
+	publicIP, err := getPublicIP()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get public IP: %w", err)
 	}
 
 	// Prepare device registration payload
@@ -130,25 +97,100 @@ func (c *WebSocketClient) StartPairing(pairingCode string) (*model.Device, error
 		ID:          deviceID,
 		Name:        getLocalHostname(),
 		PairingCode: pairingCode,
+		Address:     localIP.String(),
+		PublicAddr:  publicIP,
+		Port:        port,
+		OS:          deviceInfo.DetectOS(),
 	}
-	payload, err := json.Marshal(deviceInfo)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal device info: %v", err)
-	}
-
-	// Create registration message
-	registerMsg := model.Message{
-		Type:     model.MsgTypeRegister,
-		DeviceID: deviceID,
-		Payload:  payload,
-	}
-
-	// Send registration message
-	if err := c.conn.WriteJSON(registerMsg); err != nil {
-		return nil, fmt.Errorf("failed to send registration message: %v", err)
+	if err := c.sendRegistration(deviceInfo); err != nil {
+		return nil, fmt.Errorf("failed to send registration message: %w", err)
 	}
 
 	return &deviceInfo, nil
+}
+
+func (c *WebSocketClient) sendRegistration(device model.Device) error {
+	payload, err := json.Marshal(device)
+	if err != nil {
+		return fmt.Errorf("failed to marshal device info: %w", err)
+	}
+
+	registerMsg := model.Message{
+		Type:     model.MsgTypeRegister,
+		DeviceID: device.ID,
+		Payload:  payload,
+	}
+
+	return c.conn.WriteJSON(registerMsg)
+}
+
+func (c *WebSocketClient) HandleMessages(ctx context.Context, cb func(msg model.Message)) {
+	defer c.conn.Close()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			_, msgBytes, err := c.conn.ReadMessage()
+			if err != nil {
+				log.Printf("Error reading from: %v", err)
+				go c.reconnect(ctx)
+				return
+			}
+
+			var msg model.Message
+			if err := json.Unmarshal(msgBytes, &msg); err != nil {
+				log.Printf("Error parsing message from: %v", err)
+				continue
+			}
+
+			fmt.Println("msg", msg)
+
+			cb(msg)
+		}
+	}
+}
+
+// SendMessage sends a message
+func (c *WebSocketClient) SendMessage(msg model.Message) error {
+	if c.conn == nil {
+		return fmt.Errorf("no connection to relay server")
+	}
+
+	msgBytes, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal message: %w", err)
+	}
+
+	return c.conn.WriteMessage(websocket.TextMessage, msgBytes)
+}
+
+func (c *WebSocketClient) reconnect(ctx context.Context) {
+	backoff := 1 * time.Second
+	maxBackoff := 60 * time.Second
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+			log.Printf("Attempting to reconnect to relayt server...")
+
+			if err := c.Connect(); err != nil {
+				log.Printf("Failed to reaconnect to relay server: %v", err)
+
+				jitter := time.Duration(rand.IntN(1000)) * time.Millisecond
+				backoff = backoff*2 + jitter
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			} else {
+				log.Printf("Successfully reconnect to relay server")
+				return
+			}
+		}
+	}
 }
 
 // handleIncomingMessages processes messages from the relay server
@@ -171,108 +213,12 @@ func (c *WebSocketClient) handleIncomingMessages() {
 		// Handle different message types
 		switch msg.Type {
 		case "device_update":
-			c.handleDeviceUpdate(msg)
+			// c.handleDeviceUpdate(msg)
 		case "pairing_complete":
-			c.handlePairingComplete(msg)
+			// c.handlePairingComplete(msg)
 			// Add other message type handlers as needed
 		}
 	}
-}
-
-// handleDeviceUpdate updates the local device list when a device changes
-func (c *WebSocketClient) handleDeviceUpdate(msg model.Message) {
-	var deviceInfo model.Device
-	if err := json.Unmarshal(msg.Payload, &deviceInfo); err != nil {
-		log.Printf("Error parsing device update: %v", err)
-		return
-	}
-
-	c.devicesMutex.Lock()
-	defer c.devicesMutex.Unlock()
-
-	// Update or add device
-	c.devices[deviceInfo.ID] = deviceInfo
-
-	// Optional: Persist device list
-	if err := c.saveDevicesToConfig(); err != nil {
-		log.Printf("Failed to save device updates: %v", err)
-	}
-
-	// Log the update
-	log.Printf("Device updated: %+v", deviceInfo)
-}
-
-// handlePairingComplete processes the successful pairing
-func (c *WebSocketClient) handlePairingComplete(msg model.Message) {
-	var pairingInfo struct {
-		DeviceID string `json:"deviceId"`
-	}
-	if err := json.Unmarshal(msg.Payload, &pairingInfo); err != nil {
-		log.Printf("Error parsing pairing complete message: %v", err)
-		return
-	}
-
-	c.deviceID = pairingInfo.DeviceID
-	log.Printf("Pairing complete. Assigned Device ID: %s", c.deviceID)
-}
-
-// saveDevicesToConfig saves the current device list to a JSON config file
-func (c *WebSocketClient) saveDevicesToConfig() error {
-	configDir := getConfigDir()
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		return fmt.Errorf("failed to create config directory: %v", err)
-	}
-
-	configPath := filepath.Join(configDir, "devices.json")
-
-	// Prepare device config
-	config := model.DeviceConfig{
-		Devices: c.devices,
-	}
-
-	// Marshal and save
-	configData, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal device config: %v", err)
-	}
-
-	return os.WriteFile(configPath, configData, 0600)
-}
-
-// StartSync begins the synchronization process
-func (c *WebSocketClient) StartSync() error {
-	// Start message handling
-	go c.handleIncomingMessages()
-
-	// Periodic heartbeat or additional sync logic
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-
-		for range ticker.C {
-			// Send periodic sync message or heartbeat
-			syncMsg := model.Message{
-				Type: "sync_request",
-			}
-			if err := c.conn.WriteJSON(syncMsg); err != nil {
-				log.Printf("Sync request failed: %v", err)
-				break
-			}
-		}
-	}()
-
-	return nil
-}
-
-func getConfigDir() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatalf("Failed to get user home directory: %v", err)
-	}
-	if xdgConfigHome := os.Getenv("XDG_CONFIG_HOME"); xdgConfigHome != "" {
-		return filepath.Join(xdgConfigHome, "gorsync")
-	}
-	return filepath.Join(homeDir, ".gorsync")
 }
 
 // getLocalHostname retrieves the device's hostname
@@ -292,16 +238,74 @@ func generateShortDeviceID() string {
 	return fullID[:8]
 }
 
-// detectOS returns the current operating system
-func detectOS() string {
-	switch os := runtime.GOOS; os {
-	case "windows":
-		return "windows"
-	case "darwin":
-		return "macos"
-	case "linux":
-		return "linux"
-	default:
-		return os
+// getOutboundIP gets the preferred outbound IP of this machine
+func getOutboundIP() (net.IP, error) {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return nil, err
 	}
+	defer conn.Close()
+
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP, nil
 }
+
+func getPublicIP() (string, error) {
+	resp, err := http.Get("https://api64.ipify.org?format=text")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	ip, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return string(ip), nil
+}
+
+func generateDeviceID() (string, error) {
+	return deviceInfo.GenerateDeviceID(deviceInfo.GetConfigDir())
+}
+
+// waitForDeviceUpdate waits for a device update message from the server
+// func (c *WebSocketClient) WaitForDeviceUpdate() (*model.Device, error) {
+// 	// Set a timeout for waiting for the device update
+// 	_ = c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+// 	defer c.conn.SetReadDeadline(time.Time{}) // Clear deadline
+
+// 	for {
+// 		// Read message
+// 		_, msgBytes, err := c.conn.ReadMessage()
+// 		if err != nil {
+// 			return nil, fmt.Errorf("error reading WebSocket message: %v", err)
+// 		}
+
+// 		// Parse message
+// 		var msg model.Message
+// 		if err := json.Unmarshal(msgBytes, &msg); err != nil {
+// 			return nil, fmt.Errorf("error parsing message: %v", err)
+// 		}
+
+// 		// Check for device update message
+// 		if msg.Type == model.MsgDeviceUpdate {
+// 			var deviceInfo model.Device
+// 			if err := json.Unmarshal(msg.Payload, &deviceInfo); err != nil {
+// 				return nil, fmt.Errorf("error parsing device info: %v", err)
+// 			}
+// 			return &deviceInfo, nil
+// 		}
+
+// 		// Optional: Handle other message types or unexpected messages
+// 		if msg.Type == model.MsgTypeError {
+// 			var errMsg struct {
+// 				Error string `json:"error"`
+// 			}
+// 			if err := json.Unmarshal(msg.Payload, &errMsg); err == nil {
+// 				return nil, fmt.Errorf("server error: %s", errMsg.Error)
+// 			}
+// 			return nil, fmt.Errorf("unknown server error")
+// 		}
+// 	}
+// }

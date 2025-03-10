@@ -106,10 +106,12 @@ type Device struct {
 	Name        string         `json:"name"`
 	LastSeen    time.Time      `json:"lastSeen"`
 	IsOnline    bool           `json:"isOnline"`
-	PublicAddr  string         `json:"publicAddr"`
 	PairingCode string         `json:"pairingCode"`
 	Settings    DeviceSettings `json:"settings"`
 	OS          string         `json:"os"`
+	PublicAddr  string         `json:"publicAddr"`
+	Address     string         `json:"address"`
+	Port        int            `json:"port"`
 }
 
 // DeviceSettings represents the settings of a device
@@ -124,7 +126,3 @@ type DeviceSettings struct {
 type DeviceConfig struct {
 	Devices map[string]Device `json:"devices"`
 }
-
-// type SyncServer struct {
-// 	IsRunning bool `json:"isRunning"`
-// }

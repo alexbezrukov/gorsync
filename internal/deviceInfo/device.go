@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -131,4 +132,18 @@ func GetConfigDir() string {
 		return filepath.Join(xdgConfigHome, "gorsync")
 	}
 	return filepath.Join(homeDir, ".gorsync")
+}
+
+// detectOS returns the current operating system
+func DetectOS() string {
+	switch os := runtime.GOOS; os {
+	case "windows":
+		return "windows"
+	case "darwin":
+		return "macos"
+	case "linux":
+		return "linux"
+	default:
+		return os
+	}
 }
