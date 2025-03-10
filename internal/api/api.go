@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"gorsync/internal/memstore"
 	"gorsync/internal/model"
 	"gorsync/internal/server"
@@ -11,39 +10,38 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
 )
 
-var (
-	settings = model.AppSettings{
-		AppName:           "MyApp",
-		Port:              9001,
-		DefaultSyncDir:    "/sync",
-		SyncInterval:      60,
-		AutoSync:          true,
-		MaxTransferSize:   100,
-		ConnectionTimeout: 30,
-		DebugMode:         false,
-	}
+// var (
+// 	settings = model.AppSettings{
+// 		AppName:           "MyApp",
+// 		Port:              9001,
+// 		DefaultSyncDir:    "/sync",
+// 		SyncInterval:      60,
+// 		AutoSync:          true,
+// 		MaxTransferSize:   100,
+// 		ConnectionTimeout: 30,
+// 		DebugMode:         false,
+// 	}
 
-	settingsMutex sync.Mutex
-)
+// 	settingsMutex sync.Mutex
+// )
 
-var transfers = []model.Transfer{
-	{ID: "1", FileName: "file1.txt", FilePath: "/path/to/file1.txt", FileSize: 1024, Direction: "upload", DeviceID: "device1", DeviceName: "Laptop", StartTime: "2024-07-10T10:00:00Z", Status: "in_progress", Progress: 50},
-}
+// var transfers = []model.Transfer{
+// 	{ID: "1", FileName: "file1.txt", FilePath: "/path/to/file1.txt", FileSize: 1024, Direction: "upload", DeviceID: "device1", DeviceName: "Laptop", StartTime: "2024-07-10T10:00:00Z", Status: "in_progress", Progress: 50},
+// }
 
-var mu sync.Mutex
+// var mu sync.Mutex
 
 type APIServer struct {
 	httpServer *http.Server
 	sync       *server.SyncServer
-	cancel     context.CancelFunc
-	ctx        context.Context
-	memstore   *memstore.MemStore
+	// cancel     context.CancelFunc
+	// ctx        context.Context
+	memstore *memstore.MemStore
 }
 
 func NewAPIServer(
@@ -65,18 +63,18 @@ func NewAPIServer(
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	r.HandleFunc("/api/transfers", getTransfersHandler).Methods("GET")
-	r.HandleFunc("/api/transfers/{id}/cancel", cancelTransferHandler).Methods("POST")
-	r.HandleFunc("/api/transfers/{id}/pause", pauseTransferHandler).Methods("POST")
-	r.HandleFunc("/api/transfers/{id}/resume", resumeTransferHandler).Methods("POST")
+	// r.HandleFunc("/api/transfers", getTransfersHandler).Methods("GET")
+	// r.HandleFunc("/api/transfers/{id}/cancel", cancelTransferHandler).Methods("POST")
+	// r.HandleFunc("/api/transfers/{id}/pause", pauseTransferHandler).Methods("POST")
+	// r.HandleFunc("/api/transfers/{id}/resume", resumeTransferHandler).Methods("POST")
 
-	r.HandleFunc("/api/devices", s.getDevicesHandler).Methods("GET")
-	r.HandleFunc("/api/devices/{deviceId}/settings", s.getDeviceSettingsHandler).Methods("GET")
-	r.HandleFunc("/api/devices/{deviceId}/settings", s.updateDeviceSettingsHandler).Methods("POST")
-	r.HandleFunc("/api/devices/{deviceId}/{action}", s.syncDeviceHandler).Methods("POST")
+	// r.HandleFunc("/api/devices", s.getDevicesHandler).Methods("GET")
+	// r.HandleFunc("/api/devices/{deviceId}/settings", s.getDeviceSettingsHandler).Methods("GET")
+	// r.HandleFunc("/api/devices/{deviceId}/settings", s.updateDeviceSettingsHandler).Methods("POST")
+	// r.HandleFunc("/api/devices/{deviceId}/{action}", s.syncDeviceHandler).Methods("POST")
 
-	r.HandleFunc("/api/settings", saveSettingsHandler).Methods("PUT")
-	r.HandleFunc("/api/settings", fetchSettingsHandler).Methods("GET")
+	// r.HandleFunc("/api/settings", saveSettingsHandler).Methods("PUT")
+	// r.HandleFunc("/api/settings", fetchSettingsHandler).Methods("GET")
 
 	r.HandleFunc("/api/filesystem/directory", getFilesystemInfo).Methods("GET")
 
@@ -111,64 +109,64 @@ func respondWithError(w http.ResponseWriter, code int, message string) {
 	json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
-func getTransfersHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	mu.Lock()
-	defer mu.Unlock()
-	json.NewEncoder(w).Encode(transfers)
-}
+// func getTransfersHandler(w http.ResponseWriter, r *http.Request) {
+// 	w.Header().Set("Content-Type", "application/json")
+// 	mu.Lock()
+// 	defer mu.Unlock()
+// 	json.NewEncoder(w).Encode(transfers)
+// }
 
-func updateTransferStatus(w http.ResponseWriter, r *http.Request, status string) {
-	vars := mux.Vars(r)
-	transferID := vars["id"]
+// func updateTransferStatus(w http.ResponseWriter, r *http.Request, status string) {
+// 	vars := mux.Vars(r)
+// 	transferID := vars["id"]
 
-	mu.Lock()
-	defer mu.Unlock()
+// 	mu.Lock()
+// 	defer mu.Unlock()
 
-	for i, t := range transfers {
-		if t.ID == transferID {
-			transfers[i].Status = status
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-	}
+// 	for i, t := range transfers {
+// 		if t.ID == transferID {
+// 			transfers[i].Status = status
+// 			w.WriteHeader(http.StatusOK)
+// 			return
+// 		}
+// 	}
 
-	http.Error(w, "Transfer not found", http.StatusNotFound)
-}
+// 	http.Error(w, "Transfer not found", http.StatusNotFound)
+// }
 
-func cancelTransferHandler(w http.ResponseWriter, r *http.Request) {
-	updateTransferStatus(w, r, "cancelled")
-}
-func pauseTransferHandler(w http.ResponseWriter, r *http.Request) {
-	updateTransferStatus(w, r, "paused")
-}
-func resumeTransferHandler(w http.ResponseWriter, r *http.Request) {
-	updateTransferStatus(w, r, "in_progress")
-}
+// func cancelTransferHandler(w http.ResponseWriter, r *http.Request) {
+// 	updateTransferStatus(w, r, "cancelled")
+// }
+// func pauseTransferHandler(w http.ResponseWriter, r *http.Request) {
+// 	updateTransferStatus(w, r, "paused")
+// }
+// func resumeTransferHandler(w http.ResponseWriter, r *http.Request) {
+// 	updateTransferStatus(w, r, "in_progress")
+// }
 
-func saveSettingsHandler(w http.ResponseWriter, r *http.Request) {
-	var updatedSettings model.AppSettings
-	if err := json.NewDecoder(r.Body).Decode(&updatedSettings); err != nil {
-		respondWithError(w, http.StatusBadRequest, "Invalid JSON payload")
-		return
-	}
+// func saveSettingsHandler(w http.ResponseWriter, r *http.Request) {
+// 	var updatedSettings model.AppSettings
+// 	if err := json.NewDecoder(r.Body).Decode(&updatedSettings); err != nil {
+// 		respondWithError(w, http.StatusBadRequest, "Invalid JSON payload")
+// 		return
+// 	}
 
-	settingsMutex.Lock()
-	settings = updatedSettings
-	settingsMutex.Unlock()
-	w.WriteHeader(http.StatusOK)
-}
+// 	settingsMutex.Lock()
+// 	settings = updatedSettings
+// 	settingsMutex.Unlock()
+// 	w.WriteHeader(http.StatusOK)
+// }
 
-func fetchSettingsHandler(w http.ResponseWriter, r *http.Request) {
-	settingsMutex.Lock()
-	defer settingsMutex.Unlock()
-	json.NewEncoder(w).Encode(settings)
-}
+// func fetchSettingsHandler(w http.ResponseWriter, r *http.Request) {
+// 	settingsMutex.Lock()
+// 	defer settingsMutex.Unlock()
+// 	json.NewEncoder(w).Encode(settings)
+// }
 
-func (s *APIServer) getDevicesHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(s.memstore.GetDevices())
-}
+// func (s *APIServer) getDevicesHandler(w http.ResponseWriter, r *http.Request) {
+// 	w.Header().Set("Content-Type", "application/json")
+// 	json.NewEncoder(w).Encode(s.memstore.GetDevices())
+// }
 
 func getFilesystemInfo(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
@@ -192,99 +190,99 @@ func getFilesystemInfo(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(contents)
 }
 
-func (s *APIServer) syncDeviceHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	deviceID := vars["deviceId"]
-	action := vars["action"] // "start-sync" or "stop-sync"
+// func (s *APIServer) syncDeviceHandler(w http.ResponseWriter, r *http.Request) {
+// 	vars := mux.Vars(r)
+// 	deviceID := vars["deviceId"]
+// 	action := vars["action"] // "start-sync" or "stop-sync"
 
-	log.Printf("Received sync request for device: %s, action: %s", deviceID, action)
+// 	log.Printf("Received sync request for device: %s, action: %s", deviceID, action)
 
-	device, exists := s.memstore.GetDevice(deviceID)
-	if !exists {
-		http.Error(w, "Device not found", http.StatusNotFound)
-		return
-	}
+// 	device, exists := s.memstore.GetDevice(deviceID)
+// 	if !exists {
+// 		http.Error(w, "Device not found", http.StatusNotFound)
+// 		return
+// 	}
 
-	// if device.Local {
-	// 	// Local device: Start or Stop sync
-	// 	if action == "start-sync" {
-	// 		if s.cancel != nil {
-	// 			s.cancel() // Cancel any existing sync process before starting a new one
-	// 		}
+// 	// if device.Local {
+// 	// 	// Local device: Start or Stop sync
+// 	// 	if action == "start-sync" {
+// 	// 		if s.cancel != nil {
+// 	// 			s.cancel() // Cancel any existing sync process before starting a new one
+// 	// 		}
 
-	// 		s.ctx, s.cancel = context.WithCancel(context.Background())
-	// 		device.Syncing = true
-	// 		log.Printf("Starting sync for local device: %s", deviceID)
+// 	// 		s.ctx, s.cancel = context.WithCancel(context.Background())
+// 	// 		device.Syncing = true
+// 	// 		log.Printf("Starting sync for local device: %s", deviceID)
 
-	// 		go func() {
-	// 			if err := s.sync.Start(s.ctx); err != nil {
-	// 				log.Println("Sync server error:", err)
-	// 			}
-	// 		}()
-	// 	} else if action == "stop-sync" {
-	// 		if s.cancel != nil {
-	// 			s.cancel() // Cancel the running sync process
-	// 		}
-	// 		device.Syncing = false
-	// 		log.Printf("Stopping sync for local device: %s", deviceID)
-	// 		s.sync.Stop()
-	// 	} else {
-	// 		http.Error(w, "Invalid action", http.StatusBadRequest)
-	// 		return
-	// 	}
-	// } else {
-	// 	// Remote device: Forward request to another machine
-	// 	forwardURL := fmt.Sprintf("http://%s:%d/api/devices/%s/%s", device.Address, 9001, deviceID, action)
-	// 	log.Printf("Forwarding request to remote device: %s", forwardURL)
+// 	// 		go func() {
+// 	// 			if err := s.sync.Start(s.ctx); err != nil {
+// 	// 				log.Println("Sync server error:", err)
+// 	// 			}
+// 	// 		}()
+// 	// 	} else if action == "stop-sync" {
+// 	// 		if s.cancel != nil {
+// 	// 			s.cancel() // Cancel the running sync process
+// 	// 		}
+// 	// 		device.Syncing = false
+// 	// 		log.Printf("Stopping sync for local device: %s", deviceID)
+// 	// 		s.sync.Stop()
+// 	// 	} else {
+// 	// 		http.Error(w, "Invalid action", http.StatusBadRequest)
+// 	// 		return
+// 	// 	}
+// 	// } else {
+// 	// 	// Remote device: Forward request to another machine
+// 	// 	forwardURL := fmt.Sprintf("http://%s:%d/api/devices/%s/%s", device.Address, 9001, deviceID, action)
+// 	// 	log.Printf("Forwarding request to remote device: %s", forwardURL)
 
-	// 	transport := &http.Transport{
-	// 		DisableKeepAlives: true, // Prevents connection reuse issues
-	// 	}
-	// 	client := &http.Client{
-	// 		Timeout:   10 * time.Second,
-	// 		Transport: transport,
-	// 	}
+// 	// 	transport := &http.Transport{
+// 	// 		DisableKeepAlives: true, // Prevents connection reuse issues
+// 	// 	}
+// 	// 	client := &http.Client{
+// 	// 		Timeout:   10 * time.Second,
+// 	// 		Transport: transport,
+// 	// 	}
 
-	// 	req, err := http.NewRequest("POST", forwardURL, bytes.NewBuffer([]byte("{}")))
-	// 	if err != nil {
-	// 		log.Println("Failed to create request:", err)
-	// 		http.Error(w, "Failed to create request", http.StatusInternalServerError)
-	// 		return
-	// 	}
-	// 	req.Header.Set("Content-Type", "application/json")
+// 	// 	req, err := http.NewRequest("POST", forwardURL, bytes.NewBuffer([]byte("{}")))
+// 	// 	if err != nil {
+// 	// 		log.Println("Failed to create request:", err)
+// 	// 		http.Error(w, "Failed to create request", http.StatusInternalServerError)
+// 	// 		return
+// 	// 	}
+// 	// 	req.Header.Set("Content-Type", "application/json")
 
-	// 	resp, err := client.Do(req)
-	// 	if err != nil {
-	// 		log.Println("Failed to forward request:", err)
-	// 		http.Error(w, "Failed to forward request", http.StatusBadGateway)
-	// 		return
-	// 	}
-	// 	defer resp.Body.Close()
+// 	// 	resp, err := client.Do(req)
+// 	// 	if err != nil {
+// 	// 		log.Println("Failed to forward request:", err)
+// 	// 		http.Error(w, "Failed to forward request", http.StatusBadGateway)
+// 	// 		return
+// 	// 	}
+// 	// 	defer resp.Body.Close()
 
-	// 	// Update device syncing status based on response
-	// 	if resp.StatusCode == http.StatusOK {
-	// 		if action == "start-sync" {
-	// 			device.Syncing = true
-	// 		} else if action == "stop-sync" {
-	// 			device.Syncing = false
-	// 		}
-	// 	} else {
-	// 		log.Printf("Received non-200 status: %d from %s", resp.StatusCode, forwardURL)
-	// 	}
+// 	// 	// Update device syncing status based on response
+// 	// 	if resp.StatusCode == http.StatusOK {
+// 	// 		if action == "start-sync" {
+// 	// 			device.Syncing = true
+// 	// 		} else if action == "stop-sync" {
+// 	// 			device.Syncing = false
+// 	// 		}
+// 	// 	} else {
+// 	// 		log.Printf("Received non-200 status: %d from %s", resp.StatusCode, forwardURL)
+// 	// 	}
 
-	// 	w.WriteHeader(resp.StatusCode)
-	// 	io.Copy(w, resp.Body)
-	// }
+// 	// 	w.WriteHeader(resp.StatusCode)
+// 	// 	io.Copy(w, resp.Body)
+// 	// }
 
-	// Save updated device status
-	s.memstore.SaveDevice(device)
+// 	// Save updated device status
+// 	s.memstore.SaveDevice(device)
 
-	// Respond with updated device state
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(device); err != nil {
-		log.Println("Failed to encode response:", err)
-	}
-}
+// 	// Respond with updated device state
+// 	w.Header().Set("Content-Type", "application/json")
+// 	if err := json.NewEncoder(w).Encode(device); err != nil {
+// 		log.Println("Failed to encode response:", err)
+// 	}
+// }
 
 func getDirectoryContents(dirPath string) ([]model.FileInfo, error) {
 	entries, err := os.ReadDir(dirPath)
@@ -333,52 +331,52 @@ func corsMiddleware(next http.Handler) http.Handler {
 }
 
 // Get device settings
-func (s *APIServer) getDeviceSettingsHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	deviceID := vars["deviceId"]
+// func (s *APIServer) getDeviceSettingsHandler(w http.ResponseWriter, r *http.Request) {
+// 	vars := mux.Vars(r)
+// 	deviceID := vars["deviceId"]
 
-	device, exists := s.memstore.GetDevice(deviceID)
-	if !exists {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
+// 	device, exists := s.memstore.GetDevice(deviceID)
+// 	if !exists {
+// 		w.WriteHeader(http.StatusNotFound)
+// 		return
+// 	}
 
-	fmt.Println("getDeviceSettingsHandler device", device.ID, device.Settings)
+// 	fmt.Println("getDeviceSettingsHandler device", device.ID, device.Settings)
 
-	// if device.Settings == nil {
-	// 	device.Settings = model.DeviceSettings{
-	// 		SyncInterval:     30,
-	// 		AutoSync:         false,
-	// 		BandwidthLimit:   30,
-	// 		ExcludeFileTypes: ".git",
-	// 	}
-	// }
+// 	// if device.Settings == nil {
+// 	// 	device.Settings = model.DeviceSettings{
+// 	// 		SyncInterval:     30,
+// 	// 		AutoSync:         false,
+// 	// 		BandwidthLimit:   30,
+// 	// 		ExcludeFileTypes: ".git",
+// 	// 	}
+// 	// }
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(device.Settings)
-}
+// 	w.Header().Set("Content-Type", "application/json")
+// 	json.NewEncoder(w).Encode(device.Settings)
+// }
 
 // Update device settings
-func (s *APIServer) updateDeviceSettingsHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	deviceID := vars["deviceId"]
+// func (s *APIServer) updateDeviceSettingsHandler(w http.ResponseWriter, r *http.Request) {
+// 	vars := mux.Vars(r)
+// 	deviceID := vars["deviceId"]
 
-	device, exists := s.memstore.GetDevice(deviceID)
-	if !exists {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
+// 	device, exists := s.memstore.GetDevice(deviceID)
+// 	if !exists {
+// 		w.WriteHeader(http.StatusNotFound)
+// 		return
+// 	}
 
-	var settings model.DeviceSettings
-	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-	device.Settings = settings
+// 	var settings model.DeviceSettings
+// 	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+// 		http.Error(w, "Invalid request body", http.StatusBadRequest)
+// 		return
+// 	}
+// 	device.Settings = settings
 
-	s.memstore.SaveDevice(device)
+// 	s.memstore.SaveDevice(device)
 
-	fmt.Println("device", device)
+// 	fmt.Println("device", device)
 
-	w.WriteHeader(http.StatusOK)
-}
+// 	w.WriteHeader(http.StatusOK)
+// }

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"gorsync/internal/api"
 	"gorsync/internal/client"
-	"gorsync/internal/device"
+	"gorsync/internal/deviceInfo"
 	"gorsync/internal/discovery"
 	"gorsync/internal/memstore"
 	"gorsync/internal/server"
@@ -70,18 +70,18 @@ var pairCmd = &cobra.Command{
 var startCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the sync service",
-	Run:   startService,
+	Run:   start,
 }
 
 func pair(cmd *cobra.Command, args []string) {
 	if len(args) == 0 {
-		fmt.Println("Please provide a pairing code")
+		log.Fatalf("Please provide a pairing code")
 		return
 	}
 
 	pairingCode := args[0]
 	if !isValidPairingCode(pairingCode) {
-		fmt.Println("Invalid pairing code format. Expected: XXXX-YYYY-ZZZZ-AAAA")
+		log.Fatalf("Invalid pairing code format. Expected: XXXX-YYYY-ZZZZ-AAAA")
 		return
 	}
 
@@ -92,19 +92,15 @@ func pair(cmd *cobra.Command, args []string) {
 
 	err := c.Connect()
 	if err != nil {
-		fmt.Printf("Failed to connect to relay server: %s\n", err)
+		log.Fatalf("Failed to connect to relay server: %s\n", err)
 		return
 	}
 
 	device, err := c.StartPairing(pairingCode)
 	if err != nil {
-		fmt.Printf("Failed to start pairing: %s\n", err)
+		log.Fatalf("Failed to start pairing: %s\n", err)
 		return
 	}
-
-	// if err := file.SaveDeviceLocally(device.ID, *device); err != nil {
-	// 	log.Fatalf("Failed to save device locally: %v", err)
-	// }
 
 	fmt.Println("Device added successfully. Device ID:", device.ID)
 }
@@ -126,29 +122,29 @@ func isValidPairingCode(code string) bool {
 	return re.MatchString(code)
 }
 
-func startService(cmd *cobra.Command, args []string) {
+func start(cmd *cobra.Command, args []string) {
 	fmt.Println("Starting gorsync...")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	configDir := device.GetConfigDir()
+	configDir := deviceInfo.GetConfigDir()
 	if err := loadConfig(); err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	deviceID, err := device.GetDeviceID(configDir)
+	deviceID, err := deviceInfo.GetDeviceID(configDir)
 	if err != nil {
-		log.Fatalf("Failed to generate device ID: %v", err)
+		log.Fatalf("Failed to get device ID: %v", err)
 	}
 
 	port := viper.GetInt("port")
-	syncServer := setupSyncService(deviceID, port)
+	syncServer := setupSyncServer(deviceID, port)
 	apiServer := setupAPIServer(syncServer)
 
 	setupSignalHandling(ctx, cancel, syncServer, apiServer)
 }
 
-func setupSyncService(deviceID string, port int) *server.SyncServer {
+func setupSyncServer(deviceID string, port int) *server.SyncServer {
 	syncDir := viper.GetString("sync_directory")
 	discovery := discovery.NewDiscovery(deviceID,
 		"file-syncer", 9000, memstore.NewMemStore())

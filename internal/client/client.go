@@ -3,7 +3,7 @@ package client
 import (
 	"encoding/json"
 	"fmt"
-	"gorsync/internal/device"
+	"gorsync/internal/deviceInfo"
 	"gorsync/internal/model"
 	"log"
 	"net/url"
@@ -120,7 +120,7 @@ func (c *WebSocketClient) StartPairing(pairingCode string) (*model.Device, error
 	}
 
 	// Generate a new device ID
-	deviceID, err := device.GenerateDeviceID(device.GetConfigDir())
+	deviceID, err := deviceInfo.GenerateDeviceID(deviceInfo.GetConfigDir())
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate device id: %s", err)
 	}

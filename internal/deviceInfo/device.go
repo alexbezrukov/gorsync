@@ -1,4 +1,4 @@
-package device
+package deviceInfo
 
 import (
 	"crypto/rand"
