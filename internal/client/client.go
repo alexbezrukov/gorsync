@@ -3,11 +3,13 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	"gorsync/internal/device"
 	"gorsync/internal/model"
 	"log"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -112,24 +114,16 @@ func (c *WebSocketClient) Close() error {
 }
 
 // StartPairing initiates the device pairing process
-func (c *WebSocketClient) StartPairing(pairingCode string) error {
+func (c *WebSocketClient) StartPairing(pairingCode string) (*model.Device, error) {
 	if c.conn == nil {
-		return fmt.Errorf("not connected to relay server")
+		return nil, fmt.Errorf("not connected to relay server")
 	}
 
-	// Prepare pairing message
-	// pairingMsg := model.Message{
-	// 	Type:    model.MsgTypeRegister,
-	// 	Payload: json.RawMessage(fmt.Sprintf(`{"pairingCode": "%s"}`, pairingCode)),
-	// }
-
-	// // Send pairing request
-	// if err := c.conn.WriteJSON(pairingMsg); err != nil {
-	// 	return fmt.Errorf("failed to send pairing request: %v", err)
-	// }
-
 	// Generate a new device ID
-	deviceID := generateDeviceID()
+	deviceID, err := device.GenerateDeviceID(device.GetConfigDir())
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate device id: %s", err)
+	}
 
 	// Prepare device registration payload
 	deviceInfo := model.Device{
@@ -139,7 +133,7 @@ func (c *WebSocketClient) StartPairing(pairingCode string) error {
 	}
 	payload, err := json.Marshal(deviceInfo)
 	if err != nil {
-		return fmt.Errorf("failed to marshal device info: %v", err)
+		return nil, fmt.Errorf("failed to marshal device info: %v", err)
 	}
 
 	// Create registration message
@@ -151,10 +145,10 @@ func (c *WebSocketClient) StartPairing(pairingCode string) error {
 
 	// Send registration message
 	if err := c.conn.WriteJSON(registerMsg); err != nil {
-		return fmt.Errorf("failed to send registration message: %v", err)
+		return nil, fmt.Errorf("failed to send registration message: %v", err)
 	}
 
-	return nil
+	return &deviceInfo, nil
 }
 
 // handleIncomingMessages processes messages from the relay server
@@ -281,12 +275,6 @@ func getConfigDir() string {
 	return filepath.Join(homeDir, ".gorsync")
 }
 
-// generateDeviceID creates a unique device identifier
-func generateDeviceID() string {
-	// In a real implementation, this would be a more robust unique ID generation
-	return strings.ReplaceAll(uuid.New().String(), "-", "")
-}
-
 // getLocalHostname retrieves the device's hostname
 func getLocalHostname() string {
 	hostname, err := os.Hostname()
@@ -302,4 +290,18 @@ func generateShortDeviceID() string {
 	// Use first 8 characters of the UUID
 	fullID := strings.ReplaceAll(uuid.New().String(), "-", "")
 	return fullID[:8]
+}
+
+// detectOS returns the current operating system
+func detectOS() string {
+	switch os := runtime.GOOS; os {
+	case "windows":
+		return "windows"
+	case "darwin":
+		return "macos"
+	case "linux":
+		return "linux"
+	default:
+		return os
+	}
 }

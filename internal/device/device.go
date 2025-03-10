@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -119,4 +120,15 @@ func generateDeviceName() string {
 		hostname = "unknown-host"
 	}
 	return fmt.Sprintf("%s-%s", hostname, time.Now().Format("20060102"))
+}
+
+func GetConfigDir() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("Failed to get user home directory: %v", err)
+	}
+	if xdgConfigHome := os.Getenv("XDG_CONFIG_HOME"); xdgConfigHome != "" {
+		return filepath.Join(xdgConfigHome, "gorsync")
+	}
+	return filepath.Join(homeDir, ".gorsync")
 }

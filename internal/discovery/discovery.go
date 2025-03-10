@@ -16,7 +16,6 @@ type Discovery struct {
 	serviceID     string
 	serviceName   string
 	port          int
-	metadata      map[string]string
 	broadcastAddr string
 	broadcastPort int
 	devices       map[string]*model.Device
@@ -32,14 +31,12 @@ type Discovery struct {
 func NewDiscovery(
 	serviceID, serviceName string,
 	port int,
-	metadata map[string]string,
 	memstore *memstore.MemStore) *Discovery {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Discovery{
 		serviceID:     serviceID,
 		serviceName:   serviceName,
 		port:          port,
-		metadata:      metadata,
 		broadcastAddr: "255.255.255.255",
 		broadcastPort: 9876, // Choose a port unlikely to be in use
 		devices:       make(map[string]*model.Device),

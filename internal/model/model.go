@@ -109,6 +109,7 @@ type Device struct {
 	PublicAddr  string         `json:"publicAddr"`
 	PairingCode string         `json:"pairingCode"`
 	Settings    DeviceSettings `json:"settings"`
+	OS          string         `json:"os"`
 }
 
 // DeviceSettings represents the settings of a device
